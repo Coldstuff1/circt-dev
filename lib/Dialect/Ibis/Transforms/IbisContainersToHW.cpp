@@ -14,6 +14,7 @@
 #include "circt/Dialect/Ibis/IbisPasses.h"
 #include "circt/Dialect/Ibis/IbisTypes.h"
 
+#include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -41,25 +42,41 @@ struct ContainerPortInfo {
   ContainerPortInfo(ContainerOp container) {
     SmallVector<hw::PortInfo, 4> inputs, outputs;
 
+    // Copies all attributes from a port, except for the port symbol and type.
+    auto copyPortAttrs = [](auto port) {
+      llvm::DenseSet<StringAttr> elidedAttrs;
+      elidedAttrs.insert(port.getInnerSymAttrName());
+      elidedAttrs.insert(port.getTypeAttrName());
+      llvm::SmallVector<NamedAttribute> attrs;
+      for (NamedAttribute namedAttr : port->getAttrs()) {
+        if (elidedAttrs.contains(namedAttr.getName()))
+          continue;
+        attrs.push_back(namedAttr);
+      }
+      return DictionaryAttr::get(port.getContext(), attrs);
+    };
+
     // Gather in and output port ops.
     for (auto input : container.getBodyBlock()->getOps<InputPortOp>()) {
-      opInputs[input.getSymNameAttr()] = input;
+      opInputs[input.getInnerSym().getSymName()] = input;
 
       hw::PortInfo portInfo;
-      portInfo.name = input.getSymNameAttr();
+      portInfo.name = input.getInnerSym().getSymName();
       portInfo.type = cast<PortOpInterface>(input.getOperation()).getPortType();
       portInfo.dir = hw::ModulePort::Direction::Input;
+      portInfo.attrs = copyPortAttrs(input);
       inputs.push_back(portInfo);
     }
 
     for (auto output : container.getBodyBlock()->getOps<OutputPortOp>()) {
-      opOutputs[output.getSymNameAttr()] = output;
+      opOutputs[output.getInnerSym().getSymName()] = output;
 
       hw::PortInfo portInfo;
-      portInfo.name = output.getSymNameAttr();
+      portInfo.name = output.getInnerSym().getSymName();
       portInfo.type =
           cast<PortOpInterface>(output.getOperation()).getPortType();
       portInfo.dir = hw::ModulePort::Direction::Output;
+      portInfo.attrs = copyPortAttrs(output);
       outputs.push_back(portInfo);
     }
     hwPorts = std::make_unique<hw::ModulePortInfo>(inputs, outputs);
@@ -112,7 +129,8 @@ struct ContainerOpConversionPattern : public OpConversionPattern<ContainerOp> {
       if (nUsers != 1)
         return outputPort->emitOpError()
                << "expected exactly one ibis.port.write op of the output "
-                  "port";
+                  "port: "
+               << output.name.str() << " found: " << nUsers;
       auto writer = cast<PortWriteOp>(*users.begin());
       outputValues.push_back(writer.getValue());
       rewriter.eraseOp(outputPort);
@@ -207,9 +225,20 @@ struct ContainerInstanceOpConversionPattern
         getScopeRefModuleName(op.getResult().getType())));
     size_t nInputPorts = std::distance(cpi.hwPorts->getInputs().begin(),
                                        cpi.hwPorts->getInputs().end());
-    if (nInputPorts != inputWritesToUse.size())
-      return rewriter.notifyMatchFailure(
-          op, "expected exactly one ibis.port.write op of each input port");
+    if (nInputPorts != inputWritesToUse.size()) {
+      std::string errMsg;
+      llvm::raw_string_ostream ers(errMsg);
+      ers << "Error when lowering instance ";
+      op.print(ers, mlir::OpPrintingFlags().printGenericOpForm());
+
+      ers << "\nexpected exactly one ibis.port.write op of each input port. "
+             "Mising port assignments were:\n";
+      for (auto input : cpi.hwPorts->getInputs()) {
+        if (inputWritesToUse.find(input.name) == inputWritesToUse.end())
+          ers << "\t" << input.name << "\n";
+      }
+      return rewriter.notifyMatchFailure(op, errMsg);
+    }
     for (auto input : cpi.hwPorts->getInputs()) {
       auto writeOp = inputWritesToUse.at(input.name);
       operands.push_back(writeOp.getValue());
@@ -232,8 +261,9 @@ struct ContainerInstanceOpConversionPattern
     // Create the hw.instance op.
     StringRef moduleName = getScopeRefModuleName(op.getType());
     auto hwInst = rewriter.create<hw::InstanceOp>(
-        op.getLoc(), retTypes, op.getSymName(), moduleName, operands,
-        rewriter.getArrayAttr(argNames), rewriter.getArrayAttr(resNames),
+        op.getLoc(), retTypes, op.getInnerSym().getSymName(), moduleName,
+        operands, rewriter.getArrayAttr(argNames),
+        rewriter.getArrayAttr(resNames),
         /*parameters*/ rewriter.getArrayAttr({}), /*innerSym*/ nullptr);
 
     // Replace the reads of the output ports with the hw.instance results.
@@ -274,7 +304,7 @@ void ContainersToHWPass::runOnOperation() {
 
   ConversionTarget target(*ctx);
   target.addIllegalOp<ContainerOp, ContainerInstanceOp, ThisOp>();
-  target.addLegalDialect<hw::HWDialect>();
+  target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
   // Parts of the conversion patterns will update operations in place, which in
   // turn requires the updated operations to be legalizeable. These in-place ops

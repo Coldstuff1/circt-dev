@@ -620,20 +620,20 @@ struct Equivalence {
   LogicalResult check(InFlightDiagnostic &diag, InstanceOp a, InstanceOp b) {
     auto aName = a.getModuleNameAttr().getAttr();
     auto bName = b.getModuleNameAttr().getAttr();
+    if (aName == bName)
+      return success();
+
     // If the modules instantiate are different we will want to know why the
     // sub module did not dedupliate. This code recursively checks the child
     // module.
-    if (aName != bName) {
-      auto aModule = instanceGraph.getReferencedModule(a);
-      auto bModule = instanceGraph.getReferencedModule(b);
-      // Create a new error for the submodule.
-      diag.attachNote(std::nullopt)
-          << "in instance " << a.getNameAttr() << " of " << aName
-          << ", and instance " << b.getNameAttr() << " of " << bName;
-      check(diag, aModule, bModule);
-      return failure();
-    }
-    return success();
+    auto aModule = a.getReferencedModule(instanceGraph);
+    auto bModule = b.getReferencedModule(instanceGraph);
+    // Create a new error for the submodule.
+    diag.attachNote(std::nullopt)
+        << "in instance " << a.getNameAttr() << " of " << aName
+        << ", and instance " << b.getNameAttr() << " of " << bName;
+    check(diag, aModule, bModule);
+    return failure();
   }
 
   // NOLINTNEXTLINE(misc-no-recursion)
@@ -683,12 +683,19 @@ struct Equivalence {
       if (bValue != data.map.lookup(aValue)) {
         diag.attachNote(a->getLoc())
             << "operations use different operands, first operand is '"
-            << getFieldName(getFieldRefFromValue(aValue)).first << "'";
+            << getFieldName(
+                   getFieldRefFromValue(aValue, /*lookThroughCasts=*/true))
+                   .first
+            << "'";
         diag.attachNote(b->getLoc())
             << "second operand is '"
-            << getFieldName(getFieldRefFromValue(bValue)).first
+            << getFieldName(
+                   getFieldRefFromValue(bValue, /*lookThroughCasts=*/true))
+                   .first
             << "', but should have been '"
-            << getFieldName(getFieldRefFromValue(data.map.lookup(aValue))).first
+            << getFieldName(getFieldRefFromValue(data.map.lookup(aValue),
+                                                 /*lookThroughCasts=*/true))
+                   .first
             << "'";
         return failure();
       }
@@ -793,7 +800,7 @@ static Location mergeLoc(MLIRContext *context, Location to, Location from) {
       // simply add all of the internal locations.
       for (auto loc : fusedLoc.getLocations()) {
         if (FileLineColLoc fileLoc = dyn_cast<FileLineColLoc>(loc)) {
-          if (fileLoc.getFilename().strref().endswith(".fir")) {
+          if (fileLoc.getFilename().strref().ends_with(".fir")) {
             ++seenFIR;
             if (seenFIR > 8)
               continue;
@@ -806,7 +813,7 @@ static Location mergeLoc(MLIRContext *context, Location to, Location from) {
 
     // Might need to skip this fir.
     if (FileLineColLoc fileLoc = dyn_cast<FileLineColLoc>(loc)) {
-      if (fileLoc.getFilename().strref().endswith(".fir")) {
+      if (fileLoc.getFilename().strref().ends_with(".fir")) {
         ++seenFIR;
         if (seenFIR > 8)
           continue;
@@ -1386,10 +1393,13 @@ void fixupAllModules(InstanceGraph &instanceGraph) {
   for (auto *node : instanceGraph) {
     auto module = cast<FModuleLike>(*node->getModule());
     for (auto *instRec : node->uses()) {
-      auto inst = cast<InstanceOp>(instRec->getInstance());
+      auto inst = instRec->getInstance<InstanceOp>();
+      // Only handle module instantiations for now.
+      if (!inst)
+        continue;
       ImplicitLocOpBuilder builder(inst.getLoc(), inst->getContext());
       builder.setInsertionPointAfter(inst);
-      for (unsigned i = 0, e = getNumPorts(module); i < e; ++i) {
+      for (size_t i = 0, e = getNumPorts(module); i < e; ++i) {
         auto result = inst.getResult(i);
         auto newType = module.getPortType(i);
         auto oldType = result.getType();
@@ -1504,6 +1514,25 @@ class DedupPass : public DedupBase<DedupPass> {
                 return type_isa<RefType>(port.type) && port.isInput();
               }))
             return success();
+
+          // Only dedup extmodule's with defname.
+          if (auto ext = dyn_cast<FExtModuleOp>(*module);
+              ext && !ext.getDefname().has_value())
+            return success();
+
+          // If module has symbol (name) that must be preserved even if unused,
+          // skip it. All symbol uses must be supported, which is not true if
+          // non-private.
+          if (!module.isPrivate() || !module.canDiscardOnUseEmpty()) {
+            return success();
+          }
+
+          // Explicitly skip class-like modules.  This is presently unreachable
+          // due to above and current implementation but check anyway as dedup
+          // code does not handle these or object operations.
+          if (isa<ClassLike>(*module)) {
+            return success();
+          }
 
           llvm::SmallSetVector<StringAttr, 1> groups;
           for (auto annotation : annotations) {

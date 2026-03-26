@@ -14,6 +14,7 @@
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
+#include "circt/Support/Naming.h"
 
 using namespace circt;
 using namespace firrtl;
@@ -36,6 +37,10 @@ struct DropNamesPass : public DropNameBase<DropNamesPass> {
           return ModAction::Drop;
         return ModAction::Demote;
       });
+    } else if (preserveMode == PreserveValues::Strip) {
+      // Strip all names.
+      dropNamesIf(namesChanged, namesDropped,
+                  [](FNamableOp op) { return ModAction::Drop; });
     } else if (preserveMode == PreserveValues::Named) {
       // Drop the name if it isn't considered meaningful.
       dropNamesIf(namesChanged, namesDropped, [](FNamableOp op) {

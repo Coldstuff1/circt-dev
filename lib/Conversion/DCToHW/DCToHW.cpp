@@ -18,11 +18,11 @@
 #include "circt/Dialect/DC/DCPasses.h"
 #include "circt/Dialect/ESI/ESIOps.h"
 #include "circt/Dialect/ESI/ESITypes.h"
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Support/BackedgeBuilder.h"
-#include "circt/Support/ConversionPatterns.h"
 #include "circt/Support/ValueMapper.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Pass/PassManager.h"
@@ -254,8 +254,8 @@ struct RTLBuilder {
            "No global reset provided to this RTLBuilder - a reset "
            "signal must be provided to the reg(...) function.");
 
-    return b.create<seq::CompRegOp>(loc, in.getType(), in, resolvedClk, name,
-                                    resolvedRst, rstValue, hw::InnerSymAttr());
+    return b.create<seq::CompRegOp>(loc, in, resolvedClk, resolvedRst, rstValue,
+                                    name);
   }
 
   Value cmp(Value lhs, Value rhs, comb::ICmpPredicate predicate,
@@ -695,7 +695,7 @@ public:
     UnwrappedIO io = unwrapIO(op, operands.getOperands(), rewriter, bb);
     io.inputs[0].ready->setValue(
         RTLBuilder(op.getLoc(), rewriter).constant(1, 1));
-    rewriter.replaceOp(op, io.outputs[0].channel);
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -710,7 +710,6 @@ public:
     UnwrappedIO io = unwrapIO(op, operands.getOperands(), rewriter, bb);
     RTLBuilder rtlb(op.getLoc(), rewriter);
     io.outputs[0].valid->setValue(rtlb.constant(1, 1));
-    io.outputs[0].data->setValue(rtlb.constant(0, 0));
     rewriter.replaceOp(op, io.outputs[0].channel);
     return success();
   }
@@ -809,11 +808,11 @@ namespace {
 class DCToHWPass : public DCToHWBase<DCToHWPass> {
 public:
   void runOnOperation() override {
-    mlir::ModuleOp mod = getOperation();
+    Operation *parent = getOperation();
 
     // Lowering to HW requires that every DC-typed value is used exactly once.
     // Check whether this precondition is met, and if not, exit.
-    auto walkRes = mod.walk([&](Operation *op) {
+    auto walkRes = parent->walk([&](Operation *op) {
       for (auto res : op->getResults()) {
         if (res.getType().isa<dc::TokenType, dc::ValueType>()) {
           if (res.use_empty()) {
@@ -831,7 +830,7 @@ public:
     });
 
     if (walkRes.wasInterrupted()) {
-      mod->emitOpError()
+      parent->emitOpError()
           << "DCToHW: failed to verify that all values "
              "are used exactly once. Remember to run the "
              "fork/sink materialization pass before HW lowering.";
@@ -847,7 +846,7 @@ public:
     // between instantiated modules.
     target.addIllegalDialect<dc::DCDialect>();
 
-    RewritePatternSet patterns(mod.getContext());
+    RewritePatternSet patterns(parent->getContext());
 
     patterns.insert<ForkConversionPattern, JoinConversionPattern,
                     SelectConversionPattern, BranchConversionPattern,
@@ -855,9 +854,9 @@ public:
                     BufferConversionPattern, SourceConversionPattern,
                     SinkConversionPattern, TypeConversionPattern,
                     ToESIConversionPattern, FromESIConversionPattern>(
-        typeConverter, mod.getContext());
+        typeConverter, parent->getContext());
 
-    if (failed(applyPartialConversion(mod, target, std::move(patterns))))
+    if (failed(applyPartialConversion(parent, target, std::move(patterns))))
       signalPassFailure();
   }
 };

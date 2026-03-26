@@ -12,11 +12,12 @@ add_circt_dialect_library(CIRCTHandshake
   ${PROJECT_BINARY_DIR}/include
 
   LINK_LIBS PUBLIC
+  CIRCTSeq
   MLIRFuncDialect
   MLIRIR
-
-  DEPENDS
   MLIRArithDialect
+  
+  DEPENDS
   MLIRHandshakeInterfacesIncGen
   MLIRHandshakeCanonicalizationIncGen
   MLIRHandshakeAttributesIncGen

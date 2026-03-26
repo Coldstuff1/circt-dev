@@ -208,6 +208,9 @@ def PropertyType : FIRRTLDialectTypeHelper<
 
 def ClassType : FIRRTLDialectTypeHelper<"ClassType", "class type">;
 
+def AnyRefType : FIRRTLDialectTypeHelper<"AnyRefType", "any reference type">,
+  BuildableType<"::circt::firrtl::AnyRefType::get($_builder.getContext())">;
+
 def StringType : FIRRTLDialectTypeHelper<"StringType", "string type">,
   BuildableType<"::circt::firrtl::StringType::get($_builder.getContext())">;
 
@@ -215,10 +218,12 @@ def FIntegerType : FIRRTLDialectTypeHelper<"FIntegerType", "integer type">,
   BuildableType<"::circt::firrtl::FIntegerType::get($_builder.getContext())">;
 
 def ListType : FIRRTLDialectTypeHelper<"ListType", "list type">;
-def MapType : FIRRTLDialectTypeHelper<"MapType", "map type">;
 
 def BoolType : FIRRTLDialectTypeHelper<"BoolType", "boolean type">,
   BuildableType<"::circt::firrtl::BoolType::get($_builder.getContext())">;
+
+def DoubleType : FIRRTLDialectTypeHelper<"DoubleType", "double type">,
+  BuildableType<"::circt::firrtl::DoubleType::get($_builder.getContext())">;
 
 def PathType : FIRRTLDialectTypeHelper<"PathType", "path type">,
   BuildableType<"::circt::firrtl::PathType::get($_builder.getContext())">;

@@ -1186,15 +1186,23 @@ circuit MyModule :     ; CHECK: firrtl.circuit "MyModule" {
     output r : Probe<UInt<1>>
     output rw : RWProbe<UInt<1>>
 
-    ; CHECK-NEXT: %[[NODE:.+]], %[[NODE_RWREF:.+]] = firrtl.node
-    ; CHECK-SAME: forceable
+    ; CHECK-NEXT: %[[NODE:.+]] = firrtl.node sym @[[NODE_RW_SYM:[^ ]+]]
     node n = in
     ; CHECK-NEXT: %[[REF:.+]] = firrtl.ref.send %[[NODE]]
     ; CHECK-NEXT: ref.define %r, %[[REF]]
     define r = probe(n)
-    ; CHECK-NOT: ref.send
+    ; CHECK: %[[NODE_RWREF:.+]] = firrtl.ref.rwprobe <@RefsChild::@[[NODE_RW_SYM]]>
     ; CHECK-NEXT: ref.define %rw, %[[NODE_RWREF]]
     define rw = rwprobe(n)
+
+  ; CHECK-LABEL: module private @RefsChildOpenAgg(
+  ; CHECK-SAME: in %in: !firrtl.openbundle<a: uint<1>, rw flip: rwprobe<uint<1>>> sym [<@[[SYM:[^,]+]],1,
+  module RefsChildOpenAgg :
+    input in : { a : UInt<1>, flip rw: RWProbe<UInt<1>> }
+    ; CHECK-NEXT: %[[IN_RW:[^ ]+]] = firrtl.opensubfield %in[rw]
+    ; CHECK-NEXT: %[[RWPROBE_IN_A:[^ ]+]] = firrtl.ref.rwprobe <@RefsChildOpenAgg::@[[SYM]]>
+    ; CHECK-NEXT: firrtl.ref.define %[[IN_RW]], %[[RWPROBE_IN_A]]
+    define in.rw = rwprobe(in.a)
 
   ; CHECK-LABEL: module private @Refs(
   module Refs :
@@ -1270,14 +1278,36 @@ circuit MyModule :     ; CHECK: firrtl.circuit "MyModule" {
     ; CHECK-DAG: %[[SUM:.+]] = firrtl.and %[[READ_PROBE_IN]],
     outconst <= and(read(probe(in)), UInt(1))
 
-    ; CHECK: %[[AGG4:.+]], %[[AGG4_RWREF:.+]] = firrtl.wire
+    ; CHECK: %[[AGG4:.+]] = firrtl.wire sym [<@[[AGG4_0_b_x_SYM:[^ ]+]],4,public>]
     wire agg4 : { a : UInt, flip b : {x : UInt<1>} }[2]
     ; (static ref expr creates dead subfield accesses, skip)
-    ; CHECK: %[[AGG4_RW_0:.+]] = firrtl.ref.sub %[[AGG4_RWREF]][0]
-    ; CHECK-NEXT: %[[AGG4_RW_0_b:.+]] = firrtl.ref.sub %[[AGG4_RW_0]][1]
-    ; CHECK-NEXT: %[[AGG4_RW_0_b_x:.+]] = firrtl.ref.sub %[[AGG4_RW_0_b]][0]
+    ; CHECK: %[[AGG4_RW_0_b_x:.+]] = firrtl.ref.rwprobe <@Refs::@[[AGG4_0_b_x_SYM]]>
     ; CHECK-NEXT: firrtl.ref.define %field_rw, %[[AGG4_RW_0_b_x]]
     define field_rw = rwprobe(agg4[0].b.x)
+
+   ; CHECK: %inst_rw = firrtl.wire : !firrtl.rwprobe<uint<1>>
+   ; CHECK-NEXT: %inst_rw2 = firrtl.wire : !firrtl.rwprobe<uint<1>>
+   ; CHECK-NEXT: %rc2_in_bounce = firrtl.wire sym @[[RC2_IN_BOUNCE_SYM:[^ ]+]]
+   ; CHECK-NEXT: %rc2_in, %rc2_r, %rc2_rw = firrtl.instance rc2
+   ; CHECK-NEXT: firrtl.strictconnect %rc2_in, %rc2_in_bounce
+    wire inst_rw : RWProbe<UInt<1>>
+    wire inst_rw2 : RWProbe<UInt<1>>
+    inst rc2 of RefsChild
+
+    ; CHECK: %[[IN_CAST:[^ ]+]] = firrtl.constCast %in :
+    ; CHECK: firrtl.strictconnect %rc2_in_bounce, %[[IN_CAST]]
+    rc2.in <= in
+   ; CHECK-NEXT: firrtl.when %rc2_in_bounce :
+   ; CHECK-NEXT:   %[[RWPROBE_RC2_IN_BOUNCE_1:[^ ]+]] = firrtl.ref.rwprobe <@Refs::@[[RC2_IN_BOUNCE_SYM]]>
+   ; CHECK-NEXT:   firrtl.ref.define %inst_rw, %[[RWPROBE_RC2_IN_BOUNCE_1]]
+   ; CHECK-NEXT: }
+    when rc2.in:
+      define inst_rw = rwprobe(rc2.in)
+   ; CHECK-NEXT: firrtl.strictconnect %rc2_in_bounce,
+    rc2.in <= rc.in
+   ; CHECK-NEXT: %[[RWPROBE_RC2_IN_BOUNCE_2:[^ ]+]] = firrtl.ref.rwprobe <@Refs::@[[RC2_IN_BOUNCE_SYM]]>
+   ; CHECK-NEXT: firrtl.ref.define %inst_rw2, %[[RWPROBE_RC2_IN_BOUNCE_2]]
+    define inst_rw2 = rwprobe(rc2.in)
 
   ; CHECK-LABEL: module private @ForceRelease(
   module ForceRelease :
@@ -1410,10 +1440,6 @@ circuit MyModule :     ; CHECK: firrtl.circuit "MyModule" {
     ; CHECK-NEXT: firrtl.strictconnect %nonconst_w, [[CAST]] : !firrtl.sint<4>
     nonconst_w <= s4
 
-  ; CHECK-LABEL firrtl.class @SimpleClass() { }
-  ; Not version-gated yet, not in spec.
-  class SimpleClass:
-
 ;// -----
 
 ; CHECK-LABEL: firrtl.circuit "Foo_v3p0p0"
@@ -1510,11 +1536,12 @@ circuit Probes_refexprs:
 
     out <= and(and(a, b), and(c, d))
 
-    ; CHECK: %[[TEST:.+]], %[[TEST_REF:.+]] = firrtl.wire
+    ; CHECK: %[[TEST:.+]] = firrtl.wire sym @[[TEST_SYM:[^ ]+]]
     wire `test`: {`0`: UInt<1>, `b`: UInt<1>}
     `test`.`0` <= a
     `test`.`b` <= b
-     ; CHECK: force_initial %{{.+}}, %[[TEST_REF]], %[[TEST]]
+    ; CHECK: %[[TEST_REF:.+]] = firrtl.ref.rwprobe <@Probes_refexprs::@[[TEST_SYM]]>
+    ; CHECK: force_initial %{{.+}}, %[[TEST_REF]], %[[TEST]]
     force_initial(rwprobe(`test`), `test`)
     ; CHECK: force_initial
     force_initial(`9`.`0`.rwprobe, `test`.`0`)
@@ -1622,60 +1649,60 @@ circuit Top:
 
 ;// -----
 
-; CHECK-LABEL: firrtl.circuit "Groups"
-FIRRTL version 3.1.0
-circuit Groups:
-  declgroup A, bind:
-    declgroup B, bind:
-      declgroup C, bind:
-      declgroup D, bind:
-        declgroup E, bind:
-    declgroup F, bind:
-    ; CHECK-NEXT: firrtl.declgroup @A bind {
-    ; CHECK-NEXT:   firrtl.declgroup @B bind {
-    ; CHECK-NEXT:     firrtl.declgroup @C bind {
+; CHECK-LABEL: firrtl.circuit "Layers"
+FIRRTL version 4.0.0
+circuit Layers:
+  layer A, bind:
+    layer B, bind:
+      layer C, bind:
+      layer D, bind:
+        layer E, bind:
+    layer F, bind:
+    ; CHECK-NEXT: firrtl.layer @A bind {
+    ; CHECK-NEXT:   firrtl.layer @B bind {
+    ; CHECK-NEXT:     firrtl.layer @C bind {
     ; CHECK-NEXT:     }
-    ; CHECK-NEXT:     firrtl.declgroup @D bind {
-    ; CHECK-NEXT:       firrtl.declgroup @E bind {
+    ; CHECK-NEXT:     firrtl.layer @D bind {
+    ; CHECK-NEXT:       firrtl.layer @E bind {
     ; CHECK-NEXT:       }
     ; CHECK-NEXT:     }
     ; CHECK-NEXT:   }
-    ; CHECK-NEXT:   firrtl.declgroup @F bind {
+    ; CHECK-NEXT:   firrtl.layer @F bind {
     ; CHECK-NEXT:   }
     ; CHECK-NEXT: }
 
-  ; CHECK: firrtl.module @Groups
-  module Groups:
+  ; CHECK: firrtl.module @Layers
+  module Layers:
     input a: UInt<1>
 
-    group A:
+    layerblock A:
       node A_a = a
-      group B:
+      layerblock B:
         node B_a = a
-        group C:
+        layerblock C:
           node C_a = a
-        group D:
+        layerblock D:
           node D_a = a
-          group E:
+          layerblock E:
             node E_a = a
-      group F:
+      layerblock F:
         node F_a = a
 
-    ; CHECK-NEXT: firrtl.group @A {
+    ; CHECK-NEXT: firrtl.layerblock @A {
     ; CHECK-NEXT:   %A_a = firrtl.node{{.*}} %a
-    ; CHECK-NEXT:   firrtl.group @A::@B {
+    ; CHECK-NEXT:   firrtl.layerblock @A::@B {
     ; CHECK-NEXT:     %B_a = firrtl.node{{.*}} %a
-    ; CHECK-NEXT:     firrtl.group @A::@B::@C {
+    ; CHECK-NEXT:     firrtl.layerblock @A::@B::@C {
     ; CHECK-NEXT:       %C_a = firrtl.node{{.*}} %a
     ; CHECK-NEXT:     }
-    ; CHECK-NEXT:     firrtl.group @A::@B::@D {
+    ; CHECK-NEXT:     firrtl.layerblock @A::@B::@D {
     ; CHECK-NEXT:       %D_a = firrtl.node{{.*}} %a
-    ; CHECK-NEXT:       firrtl.group @A::@B::@D::@E {
+    ; CHECK-NEXT:       firrtl.layerblock @A::@B::@D::@E {
     ; CHECK-NEXT:         %E_a = firrtl.node{{.*}} %a
     ; CHECK-NEXT:       }
     ; CHECK-NEXT:     }
     ; CHECK-NEXT:   }
-    ; CHECK-NEXT:   firrtl.group @A::@F {
+    ; CHECK-NEXT:   firrtl.layerblock @A::@F {
     ; CHECK-NEXT:     %F_a = firrtl.node{{.*}} %a
     ; CHECK-NEXT:   }
     ; CHECK-NEXT: }
@@ -1683,7 +1710,7 @@ circuit Groups:
 
 ;// -----
 ; CHECK-LABEL: firrtl.circuit "BasicProps"
-FIRRTL version 3.2.0
+FIRRTL version 3.3.0
 circuit BasicProps :
   module BasicProps :
   ; CHECK-LABEL: module private @Integer
@@ -1706,6 +1733,31 @@ circuit BasicProps :
     ; CHECK-NEXT: firrtl.propassign %false, %1 : !firrtl.bool
     propassign true, Bool(true)
     propassign false, Bool(false)
+
+  ; CHECK-LABEL: module private @Double
+  module Double :
+     ; CHECK-SAME: out %x: !firrtl.double
+     ; CHECK-SAME: out %y: !firrtl.double
+     ; CHECK-SAME: out %negzero: !firrtl.double
+     ; CHECK-SAME: out %twoTo64: !firrtl.double
+     ; CHECK-SAME: out %exp: !firrtl.double
+     output x : Double
+     output y : Double
+     output negzero : Double
+     output twoTo64 : Double
+     output exp : Double
+     ; Try not to overly rely on double printing/rounding/precision.
+     ; CHECK-NEXT: firrtl.double  0.1111111111111111 : f64
+     ; CHECK: propassign
+     propassign x, Double(0.1111111111111111111111111111111111111111)
+     ; CHECK: firrtl.double 1.{{0*[eE]}}+00
+     propassign y, Double(1.0)
+     ; CHECK: firrtl.double -0.{{0+[eE]}}+00
+     propassign negzero, Double(-0.0)
+     ; CHECK: firrtl.double 1.844674407370955{{[0-9]*[eE]}}+
+     propassign twoTo64, Double(18446744073709551616.0)
+     ; CHECK: firrtl.double 1.2{{.+[eE]}}+30
+     propassign exp, Double(1.2E+30)
 
   ; CHECK-LABEL: module private @String
   module String :
@@ -1734,9 +1786,9 @@ circuit BasicProps :
   ; CHECK-LABEL: firrtl.class private @Client(out %a: !firrtl.class<@SimpleClass(in a: !firrtl.string, out b: !firrtl.string)>)
   class Client:
     output a: Inst<SimpleClass>
-    ; CHECK-NEXT:  %0 = firrtl.object @SimpleClass(in a: !firrtl.string, out b: !firrtl.string)
+    ; CHECK-NEXT:  %b = firrtl.object @SimpleClass(in a: !firrtl.string, out b: !firrtl.string)
     object b of SimpleClass
-    ; CHECK-NEXT: firrtl.propassign %a, %0 : !firrtl.class<@SimpleClass(in a: !firrtl.string, out b: !firrtl.string)>
+    ; CHECK-NEXT: firrtl.propassign %a, %b : !firrtl.class<@SimpleClass(in a: !firrtl.string, out b: !firrtl.string)>
     propassign a, b
 
   ; CHECK-LABEL firrtl.class private @OtherClient(in %a: !firrtl.string, out %b: !firrtl.string)
@@ -1746,6 +1798,19 @@ circuit BasicProps :
     object o of SimpleClass
     ; TODO: This test needs to be fixed up once flow-checking for objects is implemented correctly.
     propassign b, o.b
+
+  ; CHECK-LABEL firrtl.extclass private @ExtClass(in in: !firrtl.string, out out: !firrtl.string)
+  extclass ExtClass:
+    input in : String
+    output out : String
+
+  ; CHECK-LABEL: firrtl.class private @UserOfExtClass(in %ext_object: !firrtl.class<@ExtClass(in in: !firrtl.string, out out: !firrtl.string)>, out %out: !firrtl.string)
+  class UserOfExtClass:
+    input ext_object : Inst<ExtClass>
+    output out : String
+    ; CHECK-NEXT: %0 = firrtl.object.subfield %ext_object[out] : !firrtl.class<@ExtClass(in in: !firrtl.string, out out: !firrtl.string)
+    ; CHECK-NEXT: firrtl.propassign %out, %0 : !firrtl.string
+    propassign out, ext_object.out
 
   ; CHECK-LABEL: module private @List
   module List :
@@ -1776,44 +1841,6 @@ circuit BasicProps :
     ; CHECK-NEXT: firrtl.propassign %nested, %[[NESTED]]
     propassign nested, List<List<String>>(List<String>(), List<String>(String("test")), List<String>())
 
-  ; CHECK-LABEL: module private @Map
-  module Map :
-    ; CHECK-SAME: in %list: !firrtl.list<string>
-    input list : List<String>
-    ; CHECK-SAME: out %str2str: !firrtl.map<string, string>
-    ; CHECK-SAME: out %str2objs: !firrtl.map<string, class<@SimpleClass({{.*}})>>
-    ; CHECK-SAME: out %int2list: !firrtl.map<integer, list<string>>
-    ; CHECK-SAME: out %empty: !firrtl.map<integer, integer>
-    output str2str : Map<String, String>
-    output str2objs : Map<String, Inst<SimpleClass>>
-    output int2list : Map<Integer, List<String>>
-    output empty : Map<Integer, Integer>
-
-    ; CHECK-NEXT: %[[HELLO:.+]] = firrtl.string "hello"
-    ; CHECK-NEXT: %[[WORLD:.+]] = firrtl.string "world"
-    ; CHECK-NEXT: %[[STRINGS:.+]] = firrtl.map.create (%[[HELLO]] -> %[[WORLD]]) : !firrtl.map<string, string>
-    ; CHECK-NEXT: firrtl.propassign %str2str, %[[STRINGS]] : !firrtl.map<string, string>
-    propassign str2str, Map<String, String>(String("hello") -> String("world"))
-
-    ; CHECK-NEXT: %[[OBJ:.+]] = firrtl.object
-    ; CHECK-NEXT: %[[HELLO:.+]] = firrtl.string "hello"
-    ; CHECK-NEXT: %[[WORLD:.+]] = firrtl.string "world"
-    ; CHECK-NEXT: %[[OBJS:.+]] = firrtl.map.create (%[[HELLO]] -> %[[OBJ]], %[[WORLD]] -> %[[OBJ]]) : !firrtl.map<string, class<@SimpleClass({{.*}})>>
-    ; CHECK-NEXT: firrtl.propassign %str2objs, %[[OBJS]] : !firrtl.map<string, class
-    object obj of SimpleClass
-    propassign str2objs, Map<String, Inst<SimpleClass>>(String("hello") -> obj, String("world") -> obj)
-
-    ; CHECK-NEXT: %[[FIVE:.+]] = firrtl.integer 5
-    ; CHECK-NEXT: %[[EMPTY:.+]] = firrtl.list.create : !firrtl.list<string>
-    ; CHECK-NEXT: %[[TEN:.+]] = firrtl.integer 10
-    ; CHECK-NEXT: %[[INTLISTMAP:.+]] = firrtl.map.create (%[[FIVE]] -> %[[EMPTY]], %[[TEN]] -> %list) : !firrtl.map<integer, list<string>>
-    ; CHECK-NEXT: firrtl.propassign %int2list, %[[INTLISTMAP]]
-    propassign int2list, Map<Integer, List<String>>(Integer(5) -> List<String>(), Integer(10) -> list)
-
-    ; CHECK-NEXT: %[[EMPTY:.+]] = firrtl.map.create : !firrtl.map<integer, integer>
-    ; CHECK-NEXT: firrtl.propassign %empty, %[[EMPTY]]
-    propassign empty, Map<Integer, Integer>()
-
 ;// -----
 FIRRTL version 3.1.0
 
@@ -1821,7 +1848,8 @@ FIRRTL version 3.1.0
 circuit BundleOfProps:
   module BundleOfProps:
     input x : {a : String}
-    ; CHECK: openbundle<a: string>
+    wire y : {a: String}
+    ; CHECK-COUNT-2: !firrtl.openbundle<a: string>
 
 ;// -----
 FIRRTL version 3.1.0
@@ -1830,5 +1858,53 @@ FIRRTL version 3.1.0
 circuit VecOfProps:
   module VecOfProps:
     input x : String[2]
-    ; CHECK: openvector<string, 2>
+    wire y : String[2]
+    ; CHECK-COUNT-2: openvector<string, 2>
 
+;// -----
+; Test parsing of wires of probes, wires of agg of probes, and namekinds.
+; CHECK-LABEL: circuit "WireOfProbesAndNames"
+circuit WireOfProbesAndNames:
+  module WireOfProbesAndNames:
+    ; CHECK: %mixed = firrtl.wire interesting_name : !firrtl.openbundle
+    wire mixed : { a : UInt<3>, b : Probe<UInt<3>> }
+    ; CHECK: %probe = firrtl.wire : !firrtl.probe
+    wire probe : Probe<UInt<1>>
+
+;// -----
+FIRRTL version 3.3.0
+
+; CHECK-LABEL: circuit "AnyRef"
+circuit AnyRef:
+  class Foo:
+    skip
+  module AnyRef:
+    input x : AnyRef
+    ; CHECK: !firrtl.anyref
+    output y : AnyRef
+    ; CHECK: !firrtl.anyref
+    output listOfAny : List<AnyRef>
+    ; CHECK: !firrtl.list<anyref>
+
+    object foo of Foo
+    propassign y, foo
+    ; CHECK: %[[OBJ:.+]] = firrtl.object
+    ; CHECK: %[[CAST:.+]] = firrtl.object.anyref_cast %[[OBJ]]
+    ; CHECK: firrtl.propassign %y, %[[CAST]]
+
+    propassign listOfAny, List<AnyRef>(foo, x)
+    ; CHECK-NEXT: %[[CAST:.+]] = firrtl.object.anyref_cast %[[OBJ]]
+    ; CHECK-NEXT: %[[LIST:.+]] = firrtl.list.create %[[CAST]], %x
+    ; CHECK-NEXT: propassign %listOfAny, %[[LIST]]
+
+;// -----
+
+FIRRTL version 4.0.0
+; CHECK-LABEL: circuit "PublicModules"
+circuit PublicModules:
+  ; CHECK: firrtl.module @Foo
+  public module Foo:
+  ; CHECK: firrtl.module private @Bar
+  module Bar:
+  ; CHECK: firrtl.module @PublicModules
+  public module PublicModules:

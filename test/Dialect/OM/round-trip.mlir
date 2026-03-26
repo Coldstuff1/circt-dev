@@ -158,6 +158,14 @@ om.class @ListCreate() {
   om.class.field @list_field, %list : !om.list<!om.class.type<@Widget>>
 }
 
+// CHECK-LABEL: @Integer
+om.class @IntegerConstant() {
+  // CHECK: %[[const1:.+]] = om.constant #om.integer<36755551979133953793 : i67> : !om.integer
+  %0 = om.constant #om.integer<36755551979133953793 : i67> : !om.integer
+  // CHECK: om.class.field @int, %[[const1]] : !om.integer
+  om.class.field @int, %0 : !om.integer
+}
+
 // CHECK-LABEL: @String
 om.class @StringConstant() {
   // CHECK: %[[const1:.+]] = om.constant "foo" : !om.string
@@ -244,13 +252,31 @@ hw.module @PathModule() {
   %wire = hw.wire %wire sym @wire : i1
 }
 // CHECK-LABEL: @Path
-om.class @Path() {
-  // CHECK: %0 = om.path reference @HierPath
-  %0 = om.path reference @HierPath
+om.class @Path(%basepath: !om.basepath) {
+  // CHECK: %[[v0:.+]] = om.basepath_create %basepath @HierPath
+  %0 = om.basepath_create %basepath @HierPath
+  // CHECK: %[[v1:.+]] = om.path_create reference %basepath @HierPath
+  %1 = om.path_create reference %basepath @HierPath
+  // CHECK: #om<path[Foo:foo, Bar:bar]>
+  %2 = om.constant 1 : i1 { foo = #om<path[Foo:foo, Bar:bar]>}
+  // CHECK: %[[v3:.+]] = om.path_empty
+  %3 = om.path_empty
+  // CHECK: om.class.field @path_empty, %[[v3]] : !om.path
+  om.class.field @path_empty, %3 : !om.path
 }
 
-// CHECK-LABEL: @Enum
-// CHECK-SAME: !om.enum<a: !om.string, b: i64>
-om.class @Enum(%e : !om.enum<a: !om.string, b: i64>) {
-  om.class.field @map_i64, %e : !om.enum<a: !om.string, b: i64>
+om.class @FrozenPath(%basepath: !om.frozenbasepath) {
+  // CHECK: %[[v0:.+]] = om.frozenbasepath_create %basepath "Foo/bar"
+  %0 = om.frozenbasepath_create %basepath "Foo/bar"
+  // CHECK: %[[v1:.+]] = om.frozenpath_create reference %basepath "Foo/bar:Bar>w.a"
+  %1 = om.frozenpath_create reference %basepath "Foo/bar:Bar>w.a"
+}
+
+// CHECK-LABEL: @Any
+// CHECK-SAME: %[[IN:.+]]: !om.class.type
+om.class @Any(%in: !om.class.type<@Empty>) {
+  // CHECK: %[[CAST:.+]] = om.any_cast %[[IN]]
+  %0 = om.any_cast %in : (!om.class.type<@Empty>) -> !om.any
+  // CHECK: om.class.field @field, %[[CAST]]
+  om.class.field @field, %0 : !om.any
 }

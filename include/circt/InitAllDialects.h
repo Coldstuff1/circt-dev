@@ -18,11 +18,11 @@
 #include "circt/Dialect/Calyx/CalyxDialect.h"
 #include "circt/Dialect/Comb/CombDialect.h"
 #include "circt/Dialect/DC/DCDialect.h"
+#include "circt/Dialect/Debug/DebugDialect.h"
 #include "circt/Dialect/ESI/ESIDialect.h"
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
 #include "circt/Dialect/FSM/FSMOps.h"
-#include "circt/Dialect/HIR/IR/HIRDialect.h"
 #include "circt/Dialect/HW/HWDialect.h"
 #include "circt/Dialect/HWArith/HWArithDialect.h"
 #include "circt/Dialect/Handshake/HandshakeDialect.h"
@@ -38,6 +38,7 @@
 #include "circt/Dialect/SSP/SSPDialect.h"
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/Seq/SeqDialect.h"
+#include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/SystemC/SystemCDialect.h"
 #include "circt/Dialect/Verif/VerifDialect.h"
 #include "mlir/IR/Dialect.h"
@@ -53,11 +54,11 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     chirrtl::CHIRRTLDialect,
     comb::CombDialect,
     dc::DCDialect,
+    debug::DebugDialect,
     esi::ESIDialect,
     firrtl::FIRRTLDialect,
     fsm::FSMDialect,
     handshake::HandshakeDialect,
-    hir::HIRDialect,
     hw::HWDialect,
     hwarith::HWArithDialect,
     interop::InteropDialect,
@@ -70,6 +71,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     om::OMDialect,
     pipeline::PipelineDialect,
     seq::SeqDialect,
+    sim::SimDialect,
     ssp::SSPDialect,
     sv::SVDialect,
     systemc::SystemCDialect,

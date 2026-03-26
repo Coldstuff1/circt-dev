@@ -1,16 +1,8 @@
-//===-- circt-c/Dialect/OM.h - C API for OM dialect -----------------------===//
+//===- OM.h - C interface for the OM dialect ----------------------*- C -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-//===----------------------------------------------------------------------===//
-//
-// This header declares the C interface for registering and accessing the
-// OM dialect. A dialect should be registered with a context to make it
-// available to users of the context. These users must load the dialect
-// before using any of its attributes, operations or types. Parser and pass
-// manager can load registered dialects automatically.
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,6 +27,33 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(OM, om);
 
 /// Is the Type a ClassType.
 MLIR_CAPI_EXPORTED bool omTypeIsAClassType(MlirType type);
+
+/// Get the TypeID for a ClassType.
+MLIR_CAPI_EXPORTED MlirTypeID omClassTypeGetTypeID(void);
+
+/// Get the name for a ClassType.
+MLIR_CAPI_EXPORTED MlirIdentifier omClassTypeGetName(MlirType type);
+
+/// Is the Type a FrozenBasePathType.
+MLIR_CAPI_EXPORTED bool omTypeIsAFrozenBasePathType(MlirType type);
+
+/// Get the TypeID for a FrozenBasePathType.
+MLIR_CAPI_EXPORTED MlirTypeID omFrozenBasePathTypeGetTypeID(void);
+
+/// Is the Type a FrozenPathType.
+MLIR_CAPI_EXPORTED bool omTypeIsAFrozenPathType(MlirType type);
+
+/// Get the TypeID for a FrozenPathType.
+MLIR_CAPI_EXPORTED MlirTypeID omFrozenPathTypeGetTypeID(void);
+
+/// Is the Type a MapType.
+MLIR_CAPI_EXPORTED bool omTypeIsAMapType(MlirType type);
+
+// Return a key type of a MapType.
+MLIR_CAPI_EXPORTED MlirType omMapTypeGetKeyType(MlirType type);
+
+/// Is the Type a StringType.
+MLIR_CAPI_EXPORTED bool omTypeIsAStringType(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // Evaluator data structures.
@@ -92,6 +111,13 @@ MLIR_CAPI_EXPORTED MlirType omEvaluatorObjectGetType(OMEvaluatorValue object);
 MLIR_CAPI_EXPORTED OMEvaluatorValue
 omEvaluatorObjectGetField(OMEvaluatorValue object, MlirAttribute name);
 
+/// Get the object hash.
+MLIR_CAPI_EXPORTED unsigned omEvaluatorObjectGetHash(OMEvaluatorValue object);
+
+/// Check equality of two objects.
+MLIR_CAPI_EXPORTED bool omEvaluatorObjectIsEq(OMEvaluatorValue object,
+                                              OMEvaluatorValue other);
+
 /// Get all the field names from an Object, can be empty if object has no
 /// fields.
 MLIR_CAPI_EXPORTED MlirAttribute
@@ -100,6 +126,14 @@ omEvaluatorObjectGetFieldNames(OMEvaluatorValue object);
 //===----------------------------------------------------------------------===//
 // EvaluatorValue API.
 //===----------------------------------------------------------------------===//
+
+// Get a context from an EvaluatorValue.
+MLIR_CAPI_EXPORTED MlirContext
+omEvaluatorValueGetContext(OMEvaluatorValue evaluatorValue);
+
+// Get Location from an EvaluatorValue.
+MLIR_CAPI_EXPORTED MlirLocation
+omEvaluatorValueGetLoc(OMEvaluatorValue evaluatorValue);
 
 // Query if the EvaluatorValue is null.
 MLIR_CAPI_EXPORTED bool omEvaluatorValueIsNull(OMEvaluatorValue evaluatorValue);
@@ -132,6 +166,47 @@ omEvaluatorListGetNumElements(OMEvaluatorValue evaluatorValue);
 MLIR_CAPI_EXPORTED OMEvaluatorValue
 omEvaluatorListGetElement(OMEvaluatorValue evaluatorValue, intptr_t pos);
 
+/// Query if the EvaluatorValue is a Tuple.
+MLIR_CAPI_EXPORTED bool
+omEvaluatorValueIsATuple(OMEvaluatorValue evaluatorValue);
+
+/// Get the size of the tuple.
+MLIR_CAPI_EXPORTED intptr_t
+omEvaluatorTupleGetNumElements(OMEvaluatorValue evaluatorValue);
+
+/// Get an element of the tuple.
+MLIR_CAPI_EXPORTED OMEvaluatorValue
+omEvaluatorTupleGetElement(OMEvaluatorValue evaluatorValue, intptr_t pos);
+
+/// Get an element of the map.
+MLIR_CAPI_EXPORTED OMEvaluatorValue
+omEvaluatorMapGetElement(OMEvaluatorValue evaluatorValue, MlirAttribute attr);
+
+MLIR_CAPI_EXPORTED MlirAttribute omEvaluatorMapGetKeys(OMEvaluatorValue object);
+
+/// Query if the EvaluatorValue is a Map.
+MLIR_CAPI_EXPORTED bool omEvaluatorValueIsAMap(OMEvaluatorValue evaluatorValue);
+
+/// Get the Type from a Map, which will be a MapType.
+MLIR_CAPI_EXPORTED MlirType
+omEvaluatorMapGetType(OMEvaluatorValue evaluatorValue);
+
+/// Query if the EvaluatorValue is a BasePath.
+MLIR_CAPI_EXPORTED bool
+omEvaluatorValueIsABasePath(OMEvaluatorValue evaluatorValue);
+
+/// Create an empty BasePath.
+MLIR_CAPI_EXPORTED OMEvaluatorValue
+omEvaluatorBasePathGetEmpty(MlirContext context);
+
+/// Query if the EvaluatorValue is a Path.
+MLIR_CAPI_EXPORTED bool
+omEvaluatorValueIsAPath(OMEvaluatorValue evaluatorValue);
+
+/// Get a string representation of a Path.
+MLIR_CAPI_EXPORTED MlirAttribute
+omEvaluatorPathGetAsString(OMEvaluatorValue evaluatorValue);
+
 //===----------------------------------------------------------------------===//
 // ReferenceAttr API
 //===----------------------------------------------------------------------===//
@@ -139,6 +214,18 @@ omEvaluatorListGetElement(OMEvaluatorValue evaluatorValue, intptr_t pos);
 MLIR_CAPI_EXPORTED bool omAttrIsAReferenceAttr(MlirAttribute attr);
 
 MLIR_CAPI_EXPORTED MlirAttribute omReferenceAttrGetInnerRef(MlirAttribute attr);
+
+//===----------------------------------------------------------------------===//
+// IntegerAttr API
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool omAttrIsAIntegerAttr(MlirAttribute attr);
+
+/// Given an om::IntegerAttr, return the mlir::IntegerAttr.
+MLIR_CAPI_EXPORTED MlirAttribute omIntegerAttrGetInt(MlirAttribute attr);
+
+/// Get an om::IntegerAttr from mlir::IntegerAttr.
+MLIR_CAPI_EXPORTED MlirAttribute omIntegerAttrGet(MlirAttribute attr);
 
 //===----------------------------------------------------------------------===//
 // ListAttr API

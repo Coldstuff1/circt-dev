@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 from ._om_ops_gen import *
-from .._mlir_libs._circt._om import Evaluator as BaseEvaluator, Object as BaseObject, List as BaseList, ClassType, ReferenceAttr, ListAttr, MapAttr
+from .._mlir_libs._circt._om import Evaluator as BaseEvaluator, Object as BaseObject, List as BaseList, Tuple as BaseTuple, Map as BaseMap, BasePath as BaseBasePath, BasePathType, Path, PathType, ClassType, ReferenceAttr, ListAttr, MapAttr, OMIntegerAttr
 
-from ..ir import Attribute, Diagnostic, DiagnosticSeverity, Module, StringAttr
+from ..ir import Attribute, Diagnostic, DiagnosticSeverity, Module, StringAttr, IntegerAttr, IntegerType
 from ..support import attribute_to_var, var_to_attribute
 
 import sys
@@ -28,20 +28,50 @@ def wrap_mlir_object(value):
   if isinstance(value, BaseList):
     return List(value)
 
+  if isinstance(value, BaseTuple):
+    return Tuple(value)
+
+  if isinstance(value, BaseMap):
+    return Map(value)
+
+  if isinstance(value, BaseBasePath):
+    return BasePath(value)
+
+  if isinstance(value, Path):
+    return value
+
   # For objects, return an Object, wrapping the base implementation.
   assert isinstance(value, BaseObject)
   return Object(value)
 
 
+def om_var_to_attribute(obj, none_on_fail: bool = False) -> ir.Attrbute:
+  if isinstance(obj, int):
+    return OMIntegerAttr.get(IntegerAttr.get(IntegerType.get_signless(64), obj))
+  return var_to_attribute(obj, none_on_fail)
+
+
 def unwrap_python_object(value):
   # Check if the value is a Primitive.
   try:
-    return var_to_attribute(value)
+    return om_var_to_attribute(value)
   except:
     pass
 
   if isinstance(value, List):
     return BaseList(value)
+
+  if isinstance(value, Tuple):
+    return BaseTuple(value)
+
+  if isinstance(value, Map):
+    return BaseMap(value)
+
+  if isinstance(value, BasePath):
+    return BaseBasePath(value)
+
+  if isinstance(value, Path):
+    return value
 
   # Otherwise, it must be an Object. Cast to the mlir object.
   assert isinstance(value, Object)
@@ -63,6 +93,54 @@ class List(BaseList):
       yield self.__getitem__(i)
 
 
+class Tuple(BaseTuple):
+
+  def __init__(self, obj: BaseTuple) -> None:
+    super().__init__(obj)
+
+  def __getitem__(self, i):
+    val = super().__getitem__(i)
+    return wrap_mlir_object(val)
+
+  # Support iterating over a Tuple by yielding its elements.
+  def __iter__(self):
+    for i in range(0, self.__len__()):
+      yield self.__getitem__(i)
+
+
+class Map(BaseMap):
+
+  def __init__(self, obj: BaseMap) -> None:
+    super().__init__(obj)
+
+  def __getitem__(self, key):
+    val = super().__getitem__(key)
+    return wrap_mlir_object(val)
+
+  def keys(self):
+    return [wrap_mlir_object(arg) for arg in super().keys()]
+
+  def items(self):
+    for i in self:
+      yield i
+
+  def values(self):
+    for (_, v) in self:
+      yield v
+
+  # Support iterating over a Map
+  def __iter__(self):
+    for i in super().keys():
+      yield (wrap_mlir_object(i), self.__getitem__(i))
+
+
+class BasePath(BaseBasePath):
+
+  @staticmethod
+  def get_empty(context=None) -> "BasePath":
+    return BasePath(BaseBasePath.get_empty(context))
+
+
 # Define the Object class by inheriting from the base implementation in C++.
 class Object(BaseObject):
 
@@ -73,6 +151,11 @@ class Object(BaseObject):
     # Call the base method to get a field.
     field = super().__getattr__(name)
     return wrap_mlir_object(field)
+
+  def get_field_loc(self, name: str):
+    # Call the base method to get the loc.
+    loc = super().get_field_loc(name)
+    return loc
 
   # Support iterating over an Object by yielding its fields.
   def __iter__(self):

@@ -20,8 +20,8 @@
 void testEvaluator(MlirContext ctx) {
   const char *testIR =
       "module {"
-      "  om.class @Test(%param: i8) {"
-      "    om.class.field @field, %param : i8"
+      "  om.class @Test(%param: !om.integer) {"
+      "    om.class.field @field, %param : !om.integer"
       "    %0 = om.object @Child() : () -> !om.class.type<@Child>"
       "    om.class.field @child, %0 : !om.class.type<@Child>"
       "  }"
@@ -29,8 +29,10 @@ void testEvaluator(MlirContext ctx) {
       "    %0 = om.constant 14 : i64"
       "    %1 = om.constant 15 : i64"
       "    %2 = om.list_create %0, %1 : i64"
+      "    %3 = om.tuple_create %2, %0 : !om.list<i64>, i64"
       "    om.class.field @foo, %0 : i64"
       "    om.class.field @bar, %2 : !om.list<i64>"
+      "    om.class.field @baz, %3 : tuple<!om.list<i64>, i64>"
       "  }"
       "}";
 
@@ -55,7 +57,7 @@ void testEvaluator(MlirContext ctx) {
   // Test instantiation success.
 
   OMEvaluatorValue actualParam = omEvaluatorValueFromPrimitive(
-      mlirIntegerAttrGet(mlirIntegerTypeGet(ctx, 8), 42));
+      omIntegerAttrGet(mlirIntegerAttrGet(mlirIntegerTypeGet(ctx, 8), 42)));
 
   OMEvaluatorValue object =
       omEvaluatorInstantiate(evaluator, className, 1, &actualParam);
@@ -99,7 +101,7 @@ void testEvaluator(MlirContext ctx) {
 
   MlirAttribute fieldValue = omEvaluatorValueGetPrimitive(field);
 
-  // CHECK: 42 : i8
+  // CHECK: #om.integer<42 : i8> : !om.integer
   mlirAttributeDump(fieldValue);
 
   // Test get field success for child object.
@@ -122,9 +124,12 @@ void testEvaluator(MlirContext ctx) {
   OMEvaluatorValue bar = omEvaluatorObjectGetField(
       child, mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("bar")));
 
+  OMEvaluatorValue baz = omEvaluatorObjectGetField(
+      child, mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("baz")));
+
   MlirAttribute fieldNamesC = omEvaluatorObjectGetFieldNames(child);
 
-  // CHECK: ["bar", "foo"]
+  // CHECK: ["bar", "baz", "foo"]
   mlirAttributeDump(fieldNamesC);
 
   // CHECK: child object field `foo` is primitive: 1
@@ -143,6 +148,14 @@ void testEvaluator(MlirContext ctx) {
   // CHECK: 15 : i64
   mlirAttributeDump(
       omEvaluatorValueGetPrimitive(omEvaluatorListGetElement(bar, 1)));
+
+  // CHECK: child object field `baz` is tuple: 1
+  fprintf(stderr, "child object field `baz` is tuple: %d\n",
+          omEvaluatorValueIsATuple(baz));
+
+  // CHECK: 14 : i64
+  mlirAttributeDump(
+      omEvaluatorValueGetPrimitive(omEvaluatorTupleGetElement(baz, 1)));
 }
 
 int main(void) {

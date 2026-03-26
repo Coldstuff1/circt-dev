@@ -333,7 +333,8 @@ public:
                   for (size_t index = 0; index < vecType.getNumElements();
                        ++index)
                     fields.push_back(subBase.getSubField(
-                        1 + index * (vecType.getElementType().getMaxFieldID() +
+                        1 + index * (hw::FieldIdImpl::getMaxFieldID(
+                                         vecType.getElementType()) +
                                      1)));
                   return success();
                 },
@@ -375,8 +376,7 @@ public:
     if (auto inst = dyn_cast_or_null<InstanceOp>(ref.getDefiningOp())) {
       auto res = cast<OpResult>(ref.getValue());
       auto portNum = res.getResultNumber();
-      auto refMod =
-          dyn_cast_or_null<FModuleOp>(*instanceGraph.getReferencedModule(inst));
+      auto refMod = inst.getReferencedModule<FModuleOp>(instanceGraph);
       if (!refMod)
         return;
       FieldRef modArg(refMod.getArgument(portNum), ref.getFieldID());

@@ -15,12 +15,14 @@
 #include "FirMemLowering.h"
 #include "FirRegLowering.h"
 #include "circt/Dialect/Comb/CombOps.h"
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/SV/SVAttributes.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
-#include "circt/Support/ConversionPatterns.h"
+#include "circt/Support/Naming.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
@@ -42,7 +44,9 @@ namespace {
 #include "circt/Conversion/Passes.h.inc"
 
 struct SeqToSVPass : public impl::LowerSeqToSVBase<SeqToSVPass> {
+
   void runOnOperation() override;
+
   using LowerSeqToSVBase<SeqToSVPass>::lowerToAlwaysFF;
   using LowerSeqToSVBase<SeqToSVPass>::disableRegRandomization;
   using LowerSeqToSVBase<SeqToSVPass>::emitSeparateAlwaysBlocks;
@@ -57,12 +61,11 @@ namespace {
 template <typename OpTy>
 class CompRegLower : public OpConversionPattern<OpTy> {
 public:
-  CompRegLower(MLIRContext *context, TypeConverter &typeConverter,
+  CompRegLower(TypeConverter &typeConverter, MLIRContext *context,
                bool lowerToAlwaysFF)
-      : OpConversionPattern<OpTy>(context), typeConverter(typeConverter),
+      : OpConversionPattern<OpTy>(typeConverter, context),
         lowerToAlwaysFF(lowerToAlwaysFF) {}
 
-  using OpConversionPattern<OpTy>::OpConversionPattern;
   using OpAdaptor = typename OpConversionPattern<OpTy>::OpAdaptor;
 
   LogicalResult
@@ -70,10 +73,12 @@ public:
                   ConversionPatternRewriter &rewriter) const final {
     Location loc = reg.getLoc();
 
-    auto regTy = typeConverter.convertType(reg.getType());
+    auto regTy =
+        ConversionPattern::getTypeConverter()->convertType(reg.getType());
 
     auto svReg = rewriter.create<sv::RegOp>(loc, regTy, reg.getNameAttr(),
-                                            reg.getInnerSymAttr());
+                                            reg.getInnerSymAttr(),
+                                            reg.getPowerOnValue());
     svReg->setDialectAttrs(reg->getDialectAttrs());
 
     circt::sv::setSVAttributes(svReg, circt::sv::getSVAttributes(reg));
@@ -119,7 +124,6 @@ public:
                     sv::RegOp svReg, OpAdaptor reg) const;
 
 private:
-  TypeConverter &typeConverter;
   bool lowerToAlwaysFF;
 };
 
@@ -172,10 +176,8 @@ public:
         });
 
     // Create the gated clock signal.
-    Value gclk = rewriter.create<comb::AndOp>(
-        loc, clk, rewriter.create<sv::ReadInOutOp>(loc, enableLatch));
-    clockGate.replaceAllUsesWith(gclk);
-    rewriter.eraseOp(clockGate);
+    rewriter.replaceOpWithNewOp<comb::AndOp>(
+        clockGate, clk, rewriter.create<sv::ReadInOutOp>(loc, enableLatch));
     return success();
   }
 };
@@ -200,10 +202,52 @@ public:
 /// Map `seq.clock` to `i1`.
 struct SeqToSVTypeConverter : public TypeConverter {
   SeqToSVTypeConverter() {
-    addConversion([](Type type) { return type; });
-    addConversion([](seq::ClockType type) {
+    addConversion([&](Type type) { return type; });
+    addConversion([&](seq::ClockType type) {
       return IntegerType::get(type.getContext(), 1);
     });
+    addConversion([&](hw::StructType structTy) {
+      bool changed = false;
+
+      SmallVector<hw::StructType::FieldInfo> newFields;
+      for (auto field : structTy.getElements()) {
+        auto &newField = newFields.emplace_back();
+        newField.name = field.name;
+        newField.type = convertType(field.type);
+        if (field.type != newField.type)
+          changed = true;
+      }
+
+      if (!changed)
+        return structTy;
+
+      return hw::StructType::get(structTy.getContext(), newFields);
+    });
+    addConversion([&](hw::ArrayType arrayTy) {
+      auto elementTy = arrayTy.getElementType();
+      auto newElementTy = convertType(elementTy);
+      if (elementTy != newElementTy)
+        return hw::ArrayType::get(newElementTy, arrayTy.getNumElements());
+      return arrayTy;
+    });
+
+    addTargetMaterialization(
+        [&](mlir::OpBuilder &builder, mlir::Type resultType,
+            mlir::ValueRange inputs,
+            mlir::Location loc) -> std::optional<mlir::Value> {
+          if (inputs.size() != 1)
+            return std::nullopt;
+          return inputs[0];
+        });
+
+    addSourceMaterialization(
+        [&](mlir::OpBuilder &builder, mlir::Type resultType,
+            mlir::ValueRange inputs,
+            mlir::Location loc) -> std::optional<mlir::Value> {
+          if (inputs.size() != 1)
+            return std::nullopt;
+          return inputs[0];
+        });
   }
 };
 
@@ -216,20 +260,43 @@ public:
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const final {
+    // If the cast had a better name than its input, propagate it.
+    if (Operation *inputOp = adaptor.getInput().getDefiningOp())
+      if (!isa<mlir::UnrealizedConversionCastOp>(inputOp))
+        if (auto name = chooseName(op, inputOp))
+          rewriter.updateRootInPlace(
+              inputOp, [&] { inputOp->setAttr("sv.namehint", name); });
+
     rewriter.replaceOp(op, adaptor.getInput());
+    return success();
+  }
+};
+
+// Lower seq.const_clock to `hw.constant`
+//
+class ClockConstLowering : public OpConversionPattern<ConstClockOp> {
+public:
+  using OpConversionPattern<ConstClockOp>::OpConversionPattern;
+  using OpConversionPattern<ConstClockOp>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(ConstClockOp clockConst, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<hw::ConstantOp>(
+        clockConst, APInt(1, clockConst.getValue() == ClockConst::High));
     return success();
   }
 };
 
 /// Lower `seq.clock_div` to a behavioural clock divider
 ///
-class ClockDividerLowering : public OpConversionPattern<ClockDivider> {
+class ClockDividerLowering : public OpConversionPattern<ClockDividerOp> {
 public:
-  using OpConversionPattern<ClockDivider>::OpConversionPattern;
-  using OpConversionPattern<ClockDivider>::OpAdaptor;
+  using OpConversionPattern<ClockDividerOp>::OpConversionPattern;
+  using OpConversionPattern<ClockDividerOp>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(ClockDivider clockDiv, OpAdaptor adaptor,
+  matchAndRewrite(ClockDividerOp clockDiv, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const final {
     Location loc = clockDiv.getLoc();
 
@@ -273,17 +340,36 @@ public:
 
 } // namespace
 
+// NOLINTBEGIN(misc-no-recursion)
+static bool isLegalType(Type ty) {
+  if (hw::type_isa<ClockType>(ty))
+    return false;
+
+  if (auto arrayTy = hw::type_dyn_cast<hw::ArrayType>(ty))
+    return isLegalType(arrayTy.getElementType());
+
+  if (auto structTy = hw::type_dyn_cast<hw::StructType>(ty)) {
+    for (auto field : structTy.getElements())
+      if (!isLegalType(field.type))
+        return false;
+    return true;
+  }
+
+  return true;
+}
+// NOLINTEND(misc-no-recursion)
+
 static bool isLegalOp(Operation *op) {
   if (auto module = dyn_cast<hw::HWModuleLike>(op)) {
-    return llvm::all_of(module.getPortList(), [](hw::PortInfo port) {
-      return !hw::type_isa<seq::ClockType>(port.type);
-    });
+    for (auto port : module.getHWModuleType().getPorts())
+      if (!isLegalType(port.type))
+        return false;
+    return true;
   }
-  bool allOperandsLowered = llvm::all_of(op->getOperands(), [](auto op) {
-    return !hw::type_isa<seq::ClockType>(op.getType());
-  });
+  bool allOperandsLowered = llvm::all_of(
+      op->getOperands(), [](auto op) { return isLegalType(op.getType()); });
   bool allResultsLowered = llvm::all_of(op->getResults(), [](auto result) {
-    return !hw::type_isa<seq::ClockType>(result.getType());
+    return isLegalType(result.getType());
   });
   return allOperandsLowered && allResultsLowered;
 }
@@ -311,11 +397,14 @@ void SeqToSVPass::runOnOperation() {
   }
 
   // Lower memories and registers in modules in parallel.
+  bool needsRegRandomization = false;
   mlir::parallelForEach(&getContext(), modules, [&](HWModuleOp module) {
     SeqToSVTypeConverter typeConverter;
     FirRegLowering regLowering(typeConverter, module, disableRegRandomization,
                                emitSeparateAlwaysBlocks);
     regLowering.lower();
+    if (regLowering.needsRegRandomization())
+      needsRegRandomization = true;
     numSubaccessRestored += regLowering.numSubaccessRestored;
 
     if (auto *it = memsByModule.find(module); it != memsByModule.end())
@@ -329,19 +418,135 @@ void SeqToSVPass::runOnOperation() {
   target.markUnknownOpDynamicallyLegal(isLegalOp);
 
   RewritePatternSet patterns(context);
-  patterns.add<CompRegLower<CompRegOp>>(context, typeConverter,
+  patterns.add<CompRegLower<CompRegOp>>(typeConverter, context,
                                         lowerToAlwaysFF);
-  patterns.add<CompRegLower<CompRegClockEnabledOp>>(context, typeConverter,
+  patterns.add<CompRegLower<CompRegClockEnabledOp>>(typeConverter, context,
                                                     lowerToAlwaysFF);
-  patterns.add<ClockCastLowering<seq::FromClockOp>>(context);
-  patterns.add<ClockCastLowering<seq::ToClockOp>>(context);
-  patterns.add<ClockGateLowering>(context);
-  patterns.add<ClockMuxLowering>(context);
-  patterns.add<ClockDividerLowering>(context);
+  patterns.add<ClockCastLowering<seq::FromClockOp>>(typeConverter, context);
+  patterns.add<ClockCastLowering<seq::ToClockOp>>(typeConverter, context);
+  patterns.add<ClockGateLowering>(typeConverter, context);
+  patterns.add<ClockMuxLowering>(typeConverter, context);
+  patterns.add<ClockDividerLowering>(typeConverter, context);
+  patterns.add<ClockConstLowering>(typeConverter, context);
   patterns.add<TypeConversionPattern>(typeConverter, context);
 
   if (failed(applyPartialConversion(circuit, target, std::move(patterns))))
     signalPassFailure();
+
+  bool hasRegRandomization = needsRegRandomization && !disableRegRandomization;
+  bool hasMemRandomization = !memsByModule.empty() && !disableMemRandomization;
+  if (!hasRegRandomization && !hasMemRandomization)
+    return;
+
+  // Build macros for FIRRTL-style register and memory initialization.
+  // Insert them at the start of the module, after any other verbatims.
+  auto loc = UnknownLoc::get(context);
+  auto b = ImplicitLocOpBuilder::atBlockBegin(loc, circuit.getBody());
+  for (Operation &op : *circuit.getBody()) {
+    if (!isa<sv::VerbatimOp>(&op)) {
+      b.setInsertionPoint(&op);
+      break;
+    }
+  }
+
+  // TODO: We could have an operation for macros and uses of them, and
+  // even turn them into symbols so we can DCE unused macro definitions.
+  StringSet<> emittedDecls;
+  auto emitDefine = [&](StringRef name, StringRef body, ArrayAttr args = {}) {
+    if (!emittedDecls.count(name)) {
+      emittedDecls.insert(name);
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(circuit.getBody());
+      b.create<sv::MacroDeclOp>(name, args, StringAttr());
+    }
+    b.create<sv::MacroDefOp>(name, body);
+  };
+  auto emitGuardedDefine = [&](StringRef guard, StringRef defName,
+                               StringRef defineTrue = "",
+                               StringRef defineFalse = StringRef()) {
+    if (!defineFalse.data()) {
+      assert(defineTrue.data() && "didn't define anything");
+      b.create<sv::IfDefOp>(guard, [&]() { emitDefine(defName, defineTrue); });
+    } else {
+      b.create<sv::IfDefOp>(
+          guard,
+          [&]() {
+            if (defineTrue.data())
+              emitDefine(defName, defineTrue);
+          },
+          [&]() { emitDefine(defName, defineFalse); });
+    }
+  };
+
+  // Helper function to emit #ifndef guard.
+  auto emitGuard = [&](const char *guard, llvm::function_ref<void(void)> body) {
+    b.create<sv::IfDefOp>(
+        guard, []() {}, body);
+  };
+
+  b.create<sv::VerbatimOp>("// Standard header to adapt well known macros for "
+                           "register randomization.");
+
+  bool needsRandom = true;
+  if (hasMemRandomization) {
+    emitGuard("RANDOMIZE",
+              [&]() { emitGuardedDefine("RANDOMIZE_MEM_INIT", "RANDOMIZE"); });
+    needsRandom = true;
+  }
+
+  if (hasRegRandomization) {
+    emitGuard("RANDOMIZE",
+              [&]() { emitGuardedDefine("RANDOMIZE_REG_INIT", "RANDOMIZE"); });
+    needsRandom = true;
+  }
+
+  if (needsRandom) {
+    b.create<sv::VerbatimOp>(
+        "\n// RANDOM may be set to an expression that produces a 32-bit "
+        "random unsigned value.");
+    emitGuardedDefine("RANDOM", "RANDOM", StringRef(), "$random");
+
+    b.create<sv::VerbatimOp>(
+        "\n// Users can define INIT_RANDOM as general code that gets "
+        "injected "
+        "into the\n// initializer block for modules with registers.");
+    emitGuardedDefine("INIT_RANDOM", "INIT_RANDOM", StringRef(), "");
+
+    b.create<sv::VerbatimOp>(
+        "\n// If using random initialization, you can also define "
+        "RANDOMIZE_DELAY to\n// customize the delay used, otherwise 0.002 "
+        "is used.");
+    emitGuardedDefine("RANDOMIZE_DELAY", "RANDOMIZE_DELAY", StringRef(),
+                      "0.002");
+
+    b.create<sv::VerbatimOp>(
+        "\n// Define INIT_RANDOM_PROLOG_ for use in our modules below.");
+    emitGuard("INIT_RANDOM_PROLOG_", [&]() {
+      b.create<sv::IfDefOp>(
+          "RANDOMIZE",
+          [&]() {
+            emitGuardedDefine("VERILATOR", "INIT_RANDOM_PROLOG_",
+                              "`INIT_RANDOM",
+                              "`INIT_RANDOM #`RANDOMIZE_DELAY begin end");
+          },
+          [&]() { emitDefine("INIT_RANDOM_PROLOG_", ""); });
+    });
+
+    b.create<sv::VerbatimOp>("\n// Include register initializers in init "
+                             "blocks unless synthesis is set");
+    emitGuard("SYNTHESIS", [&] {
+      emitGuardedDefine("ENABLE_INITIAL_REG_", "ENABLE_INITIAL_REG_",
+                        StringRef(), "");
+    });
+
+    b.create<sv::VerbatimOp>("\n// Include rmemory initializers in init "
+                             "blocks unless synthesis is set");
+    emitGuard("SYNTHESIS", [&] {
+      emitGuardedDefine("ENABLE_INITIAL_MEM_", "ENABLE_INITIAL_MEM_",
+                        StringRef(), "");
+    });
+    b.create<sv::VerbatimOp>("");
+  }
 }
 
 std::unique_ptr<Pass>

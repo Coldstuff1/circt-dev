@@ -6,11 +6,11 @@
 // #3526
 hw.module @B() {}
 
-hw.module @A() -> () {
+hw.module @A() {
   // expected-note @below {{see existing inner symbol definition here}}
-  hw.instance "h" sym @A @B() -> () 
+  hw.instance "h" sym @A @B() -> ()
   // expected-error @below {{redefinition of inner symbol named 'A'}}
-  hw.instance "h" sym @A @B() -> () 
+  hw.instance "h" sym @A @B() -> ()
 }
 
 // -----
@@ -18,5 +18,26 @@ hw.module @A() -> () {
 // expected-error @below {{operation with symbol: #hw.innerNameRef<@A::@invalid> was not found}}
 hw.hierpath private @test [@A::@invalid]
 
-hw.module @A() -> () {
+hw.module @A() {
+}
+
+// -----
+
+// expected-error @below {{'hw.hierpath' op instance path is incorrect. Expected one of "XMRRefA", "XMRRefB" or "XMRRefC". Instead found: "XMRRefD"}}
+hw.hierpath private @ref [@XMRRefOp::@foo, @XMRRefD::@a]
+
+hw.module @XMRRefA() {
+  %a = sv.wire sym @a : !hw.inout<i2>
+}
+hw.module @XMRRefB() {
+  %a = sv.wire sym @a : !hw.inout<i2>
+}
+hw.module @XMRRefC() {
+  %a = sv.wire sym @a : !hw.inout<i2>
+}
+hw.module @XMRRefD() {
+  %a = sv.wire sym @a : !hw.inout<i2>
+}
+hw.module @XMRRefOp() {
+  hw.instance_choice "foo" sym @foo @XMRRefA or @XMRRefB if "B" or @XMRRefC if "C"() -> ()
 }

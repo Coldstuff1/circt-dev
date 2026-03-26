@@ -22,6 +22,34 @@
 
 using namespace circt;
 
+hw::InnerSymAttr hw::PortInfo::getSym() const {
+  if (attrs)
+    return attrs.getAs<::circt::hw::InnerSymAttr>(
+        hw::HWModuleLike::getPortSymbolAttrName());
+  return {};
+}
+
+void hw::PortInfo::setSym(InnerSymAttr sym, MLIRContext *ctx) {
+  auto portSymAttr =
+      StringAttr::get(ctx, hw::HWModuleLike::getPortSymbolAttrName());
+  NamedAttrList pattr(attrs);
+  Attribute oldValue;
+  if (!sym)
+    oldValue = pattr.erase(portSymAttr);
+  else
+    oldValue = pattr.set(portSymAttr, sym);
+  if (oldValue != sym) {
+    attrs = pattr.getDictionary(ctx);
+  }
+}
+
+StringRef hw::PortInfo::getVerilogName() const {
+  if (attrs)
+    if (auto updatedName = attrs.get("hw.verilogName"))
+      return updatedName.cast<StringAttr>().getValue();
+  return name.getValue();
+}
+
 LogicalResult hw::verifyInnerSymAttr(InnerSymbolOpInterface op) {
   auto innerSym = op.getInnerSymAttr();
   // If does not have any inner sym then ignore.
@@ -46,12 +74,8 @@ LogicalResult hw::verifyInnerSymAttr(InnerSymbolOpInterface op) {
   // (there are no uses for this presently, but be open to this anyway.)
   if (!result)
     return success();
-  auto resultType = result.getType().dyn_cast<FieldIDTypeInterface>();
-  // If this type doesn't implement the FieldIDTypeInterface, then there is
-  // nothing additional we can check.
-  if (!resultType)
-    return success();
-  auto maxFields = resultType.getMaxFieldID();
+  auto resultType = result.getType();
+  auto maxFields = FieldIdImpl::getMaxFieldID(resultType);
   llvm::SmallBitVector indices(maxFields + 1);
   llvm::SmallPtrSet<Attribute, 8> symNames;
   // Ensure fieldID and symbol names are unique.
@@ -97,7 +121,7 @@ raw_ostream &circt::hw::operator<<(raw_ostream &printer, PortInfo port) {
     break;
   }
   printer << dirstr << " " << port.name << " : " << port.type << " (argnum "
-          << port.argNum << ", sym " << port.sym << ", loc " << port.loc
+          << port.argNum << ", sym " << port.getSym() << ", loc " << port.loc
           << ", args " << port.attrs << ")";
   return printer;
 }

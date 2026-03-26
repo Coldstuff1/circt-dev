@@ -28,6 +28,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetails.h"
+
 #include "circt/Dialect/FIRRTL/AnnotationDetails.h"
 #include "circt/Dialect/FIRRTL/FIRRTLAttributes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
@@ -40,6 +41,7 @@
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
 #include "circt/Dialect/SV/SVOps.h"
+#include "circt/Support/Debug.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Threading.h"
 #include "llvm/ADT/APSInt.h"
@@ -87,6 +89,20 @@ struct PortInfoWithIP {
 
 } // end anonymous namespace
 
+/// Return fieldType or fieldType as same ref as type.
+static FIRRTLType mapLoweredType(FIRRTLType type, FIRRTLBaseType fieldType) {
+  return mapBaseType(type, [&](auto) { return fieldType; });
+}
+
+/// Return fieldType or fieldType as same ref as type.
+static Type mapLoweredType(Type type, FIRRTLBaseType fieldType) {
+  auto ftype = type_dyn_cast<FIRRTLType>(type);
+  if (!ftype)
+    return type;
+  return mapLoweredType(ftype, fieldType);
+}
+
+// NOLINTBEGIN(misc-no-recursion)
 /// Return true if the type has more than zero bitwidth.
 static bool hasZeroBitWidth(FIRRTLType type) {
   return FIRRTLTypeSwitch<FIRRTLType, bool>(type)
@@ -109,6 +125,7 @@ static bool hasZeroBitWidth(FIRRTLType type) {
       .Case<RefType>([](auto ref) { return hasZeroBitWidth(ref.getType()); })
       .Default([](auto) { return false; });
 }
+// NOLINTEND(misc-no-recursion)
 
 /// Return true if the type is a 1d vector type or ground type.
 static bool isOneDimVectorType(FIRRTLType type) {
@@ -122,6 +139,7 @@ static bool isOneDimVectorType(FIRRTLType type) {
       .Default([](auto groundType) { return true; });
 }
 
+// NOLINTBEGIN(misc-no-recursion)
 /// Return true if the type has a bundle type as subtype.
 static bool containsBundleType(FIRRTLType type) {
   return FIRRTLTypeSwitch<FIRRTLType, bool>(type)
@@ -131,6 +149,7 @@ static bool containsBundleType(FIRRTLType type) {
       })
       .Default([](auto groundType) { return false; });
 }
+// NOLINTEND(misc-no-recursion)
 
 /// Return true if we can preserve the type.
 static bool isPreservableAggregateType(Type type,
@@ -287,7 +306,8 @@ static MemOp cloneMemWithNewType(ImplicitLocOpBuilder *b, MemOp op,
           // `data` or `mask` sub-field to get the "real" fieldID.
           auto fieldID = field.fieldID + oldPortType.getFieldID(targetIndex);
           if (annoFieldID >= fieldID &&
-              annoFieldID <= fieldID + field.type.getMaxFieldID()) {
+              annoFieldID <=
+                  fieldID + hw::FieldIdImpl::getMaxFieldID(field.type)) {
             // Set the field ID of the new annotation.
             auto newFieldID =
                 annoFieldID - fieldID + portType.getFieldID(targetIndex);
@@ -354,8 +374,8 @@ struct TypeLoweringVisitor : public FIRRTLVisitor<TypeLoweringVisitor, bool> {
                 SmallVectorImpl<Value> &lowering);
   std::pair<Value, PortInfoWithIP>
   addArg(Operation *module, unsigned insertPt, unsigned insertPtOffset,
-         FIRRTLType srcType, FlatBundleFieldEntry field, PortInfoWithIP &oldArg,
-         hw::InnerSymAttr newSym);
+         FIRRTLType srcType, const FlatBundleFieldEntry &field,
+         PortInfoWithIP &oldArg, hw::InnerSymAttr newSym);
 
   // Helpers to manage state.
   bool visitDecl(FExtModuleOp op);
@@ -386,7 +406,7 @@ struct TypeLoweringVisitor : public FIRRTLVisitor<TypeLoweringVisitor, bool> {
   bool visitStmt(StrictConnectOp op);
   bool visitStmt(RefDefineOp op);
   bool visitStmt(WhenOp op);
-  bool visitStmt(GroupOp op);
+  bool visitStmt(LayerBlockOp op);
 
   bool isFailed() const { return encounteredError; }
 
@@ -536,7 +556,7 @@ ArrayAttr TypeLoweringVisitor::filterAnnotations(MLIRContext *ctxt,
     // Check whether the annotation falls into the range of the current field.
 
     if (fieldID < field.fieldID ||
-        fieldID > field.fieldID + field.type.getMaxFieldID())
+        fieldID > field.fieldID + hw::FieldIdImpl::getMaxFieldID(field.type))
       continue;
 
     // Add fieldID back if non-zero relative to this field.
@@ -764,10 +784,10 @@ void TypeLoweringVisitor::lowerModule(FModuleLike op) {
 std::pair<Value, PortInfoWithIP>
 TypeLoweringVisitor::addArg(Operation *module, unsigned insertPt,
                             unsigned insertPtOffset, FIRRTLType srcType,
-                            FlatBundleFieldEntry field, PortInfoWithIP &oldArg,
-                            hw::InnerSymAttr newSym) {
+                            const FlatBundleFieldEntry &field,
+                            PortInfoWithIP &oldArg, hw::InnerSymAttr newSym) {
   Value newValue;
-  FIRRTLType fieldType = mapBaseType(srcType, [&](auto) { return field.type; });
+  FIRRTLType fieldType = mapLoweredType(srcType, field.type);
   if (auto mod = llvm::dyn_cast<FModuleOp>(module)) {
     Block *body = mod.getBodyBlock();
     // Append the new argument.
@@ -946,8 +966,8 @@ bool TypeLoweringVisitor::visitStmt(WhenOp op) {
   return false; // don't delete the when!
 }
 
-/// Lower any types declared in the group definition.
-bool TypeLoweringVisitor::visitStmt(GroupOp op) {
+/// Lower any types declared in layer blocks.
+bool TypeLoweringVisitor::visitStmt(LayerBlockOp op) {
   lowerBlock(op.getBody());
   return false;
 }
@@ -1210,8 +1230,8 @@ bool TypeLoweringVisitor::visitDecl(WireOp op) {
   auto clone = [&](const FlatBundleFieldEntry &field,
                    ArrayAttr attrs) -> Value {
     return builder
-        ->create<WireOp>(field.type, "", NameKindEnum::DroppableName, attrs,
-                         StringAttr{})
+        ->create<WireOp>(mapLoweredType(op.getDataRaw().getType(), field.type),
+                         "", NameKindEnum::DroppableName, attrs, StringAttr{})
         .getResult();
   };
   return lowerProducer(op, clone);
@@ -1316,6 +1336,10 @@ bool TypeLoweringVisitor::visitExpr(mlir::UnrealizedConversionCastOp op) {
     return builder->create<mlir::UnrealizedConversionCastOp>(field.type, input)
         .getResult(0);
   };
+  // If the input to the cast is not a FIRRTL type, getSubWhatever cannot handle
+  // it, donot lower the op.
+  if (!type_isa<FIRRTLType>(op->getOperand(0).getType()))
+    return false;
   return lowerProducer(op, clone);
 }
 
@@ -1422,7 +1446,7 @@ bool TypeLoweringVisitor::visitDecl(InstanceOp op) {
   SmallVector<Attribute> newNames;
   SmallVector<Attribute> newPortAnno;
   PreserveAggregate::PreserveMode mode = getPreservationModeForModule(
-      cast<FModuleLike>(op.getReferencedModule(symTbl)));
+      cast<FModuleLike>(op.getReferencedOperation(symTbl)));
 
   endFields.push_back(0);
   for (size_t i = 0, e = op.getNumResults(); i != e; ++i) {
@@ -1443,8 +1467,7 @@ bool TypeLoweringVisitor::visitDecl(InstanceOp op) {
       for (const auto &field : fieldTypes) {
         newDirs.push_back(direction::get((unsigned)oldDir ^ field.isOutput));
         newNames.push_back(builder->getStringAttr(oldName + field.suffix));
-        resultTypes.push_back(
-            mapBaseType(srcType, [&](auto base) { return field.type; }));
+        resultTypes.push_back(mapLoweredType(srcType, field.type));
         auto annos = filterAnnotations(
             context, oldPortAnno[i].dyn_cast_or_null<ArrayAttr>(), srcType,
             field);
@@ -1617,9 +1640,7 @@ struct LowerTypesPass : public LowerFIRRTLTypesBase<LowerTypesPass> {
 
 // This is the main entrypoint for the lowering pass.
 void LowerTypesPass::runOnOperation() {
-  LLVM_DEBUG(
-      llvm::dbgs() << "===- Running LowerTypes Pass "
-                      "------------------------------------------------===\n");
+  LLVM_DEBUG(debugPassHeader(this) << "\n");
   std::vector<FModuleLike> ops;
   // Symbol Table
   auto &symTbl = getAnalysis<SymbolTable>();

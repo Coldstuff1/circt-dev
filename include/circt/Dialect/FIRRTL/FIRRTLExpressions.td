@@ -866,60 +866,6 @@ def Mux4CellIntrinsicOp : PrimOp<"int.mux4cell"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Verif and SV specific
-//===----------------------------------------------------------------------===//
-
-def IsXIntrinsicOp : FIRRTLOp<"int.isX",
-    [HasCustomSSAName, Pure]> {
-  let summary = "Test for 'x";
-  let description = [{
-    The `int.isX` expression checks that the operand is not a verilog literal
-    'x.  FIRRTL doesn't have a notion of 'x per-se, but x can come in to the
-    system from external modules and from SV constructs.  Verification
-    constructs need to explicitly test for 'x.
-    }];
-
-  let arguments = (ins FIRRTLBaseType:$arg);
-  let results = (outs NonConstUInt1Type:$result);
-  let hasFolder = 1;
-  let assemblyFormat = "$arg attr-dict `:` type($arg)";
-}
-
-def PlusArgsTestIntrinsicOp : FIRRTLOp<"int.plusargs.test",
-    [HasCustomSSAName, Pure]> {
-  let summary = "SystemVerilog `$test$plusargs` call";
-
-  let arguments = (ins StrAttr:$formatString);
-  let results = (outs NonConstUInt1Type:$found);
-  let assemblyFormat = "$formatString attr-dict";
-}
-
-def PlusArgsValueIntrinsicOp : FIRRTLOp<"int.plusargs.value",
-    [HasCustomSSAName, Pure]> {
-  let summary = "SystemVerilog `$value$plusargs` call";
-
-  let arguments = (ins StrAttr:$formatString);
-  let results = (outs NonConstUInt1Type:$found, AnyType:$result);
-  let assemblyFormat = "$formatString attr-dict `:` type($result)";
-}
-
-def HasBeenResetIntrinsicOp : FIRRTLOp<"int.has_been_reset", [Pure]> {
-  let summary = "Check that a proper reset has been seen.";
-  let description = [{
-    The result of `firrtl.int.has_been_reset` reads as 0 immediately after simulation
-    startup and after each power-cycle in a power-aware simulation. The result
-    remains 0 before and during reset and only switches to 1 after the reset is
-    deasserted again.
-
-    See the corresponding `verif.has_been_reset` operation.
-  }];
-  let arguments = (ins NonConstClockType:$clock, AnyResetType:$reset);
-  let results = (outs NonConstUInt1Type:$result);
-  let hasFolder = 1;
-  let assemblyFormat = "$clock `,` $reset attr-dict `:` type($reset)";
-}
-
-//===----------------------------------------------------------------------===//
 // Verbatim
 //===----------------------------------------------------------------------===//
 
@@ -995,7 +941,7 @@ def VerbatimWireOp : FIRRTLOp<"verbatim.wire",
 //===----------------------------------------------------------------------===//
 
 // This assumes operands are ground types without explicitly checking
-class SameGroundTypeOperandConstness<string a, string b> 
+class SameGroundTypeOperandConstness<string a, string b>
   : PredOpTrait<
       "operand constness must match",
       CPred<"isConst($" # a # ".getType()) == isConst($" # b # ".getType())">>;
@@ -1084,7 +1030,35 @@ def ObjectSubfieldOp : FIRRTLOp<"object.subfield",
     static Type inferReturnType(ValueRange operands,
                                 ArrayRef<NamedAttribute> attrs,
                                 std::optional<Location> loc);
+
+    /// Return a `FieldRef` to the accessed field.
+    FieldRef getAccessedField() {
+      auto input = getInput();
+      auto index = getIndex();
+      auto inputType = input.getType();
+      auto fieldID = inputType.getFieldID(index);
+      return FieldRef(input, fieldID);
+    }
   }];
+}
+
+def ObjectAnyRefCastOp : FIRRTLOp<"object.anyref_cast", [Pure]> {
+  let summary = "Cast object reference to anyref.";
+  let description = [{
+    Cast any object reference to AnyRef type. This is needed for passing objects
+    of a known class to sinks that accept any reference.
+
+    Example
+    ```
+      %0= firrtl.object.anyref_cast %object : !firrtl.class<@Foo()>
+    ```
+    }];
+
+  let arguments = (ins ClassType:$input);
+  let results = (outs AnyRefType:$result);
+
+  let assemblyFormat =
+     "$input attr-dict `:` type($input)";
 }
 
 def StringConstantOp : FIRRTLOp<"string", [Pure, ConstantLike]> {
@@ -1170,24 +1144,6 @@ def ListCreateOp : FIRRTLOp<"list.create", [Pure, SameTypeOperands]> {
   let hasVerifier = 1;
 }
 
-def MapCreateOp : FIRRTLOp<"map.create", [Pure, SameVariadicOperandSize]> {
-  let summary = "Produce a map value";
-  let description = [{
-    Produces a value of map type containing the provided key/value elements.
-
-    Example:
-    ```mlir
-    %4 = firrtl.map.create (%0 -> %1, %2 -> %3) : !firrtl.map<string, integer>
-    ```
-  }];
-
-  let arguments = (ins Variadic<PropertyType>:$keys, Variadic<PropertyType>:$values);
-  let results = (outs MapType:$result);
-
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
-}
-
 def BoolConstantOp : FIRRTLOp<"bool", [Pure, ConstantLike]> {
   let summary = "Produce a constant boolean value";
   let description = [{
@@ -1200,6 +1156,22 @@ def BoolConstantOp : FIRRTLOp<"bool", [Pure, ConstantLike]> {
   }];
   let arguments = (ins BoolAttr:$value);
   let results = (outs BoolType:$result);
+  let hasFolder = 1;
+  let assemblyFormat = "$value attr-dict";
+}
+
+def DoubleConstantOp : FIRRTLOp<"double", [Pure, ConstantLike]> {
+  let summary = "Produce a constant double value";
+  let description = [{
+    Produces a constant value of double type.
+
+    Example:
+    ```mlir
+    %0 = firrtl.double 3.2
+    ```
+  }];
+  let arguments = (ins DoubleAttr:$value);
+  let results = (outs DoubleType:$result);
   let hasFolder = 1;
   let assemblyFormat = "$value attr-dict";
 }
@@ -1300,6 +1272,15 @@ def RefSubOp : FIRRTLExprOp<"ref.sub"> {
 
   let assemblyFormat =
      "$input `[` $index `]` attr-dict `:` qualified(type($input))";
+
+  let firrtlExtraClassDeclaration = [{
+    /// Return a `FieldRef` to the accessed field.
+    FieldRef getAccessedField() {
+      auto inputBaseType = getInput().getType().getType();
+      size_t fieldID = ::circt::hw::FieldIdImpl::getFieldID(inputBaseType, getIndex());
+      return FieldRef(getInput(), fieldID);
+    }
+  }];
 }
 
 def RWProbeOp : FIRRTLOp<"ref.rwprobe",

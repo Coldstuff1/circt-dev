@@ -41,7 +41,7 @@ static ClkRstIdxs getMachinePortInfo(SmallVectorImpl<hw::PortInfo> &ports,
   hw::PortInfo clock;
   clock.name = b.getStringAttr("clk");
   clock.dir = hw::ModulePort::Direction::Input;
-  clock.type = b.getI1Type();
+  clock.type = seq::ClockType::get(b.getContext());
   clock.argNum = machine.getNumArguments();
   ports.push_back(clock);
   specialPorts.clockIdx = clock.argNum;
@@ -435,8 +435,9 @@ LogicalResult MachineOpConverter::dispatch() {
       b.create<sv::RegOp>(loc, stateType, b.getStringAttr("state_next"));
   auto nextStateWireRead = b.create<sv::ReadInOutOp>(loc, nextStateWire);
   stateReg = b.create<seq::CompRegOp>(
-      loc, stateType, nextStateWireRead, clock, "state_reg", reset,
-      /*reset value=*/encoding->encode(machineOp.getInitialStateOp()), nullptr);
+      loc, nextStateWireRead, clock, reset,
+      /*reset value=*/encoding->encode(machineOp.getInitialStateOp()),
+      "state_reg");
 
   llvm::DenseMap<VariableOp, sv::RegOp> variableNextStateWires;
   for (auto variableOp : machineOp.front().getOps<fsm::VariableOp>()) {
@@ -450,9 +451,8 @@ LogicalResult MachineOpConverter::dispatch() {
         varLoc, varType, b.getStringAttr(variableOp.getName() + "_next"));
     auto varResetVal = b.create<hw::ConstantOp>(varLoc, initValueAttr);
     auto variableReg = b.create<seq::CompRegOp>(
-        varLoc, varType, b.create<sv::ReadInOutOp>(varLoc, varNextState), clock,
-        b.getStringAttr(variableOp.getName() + "_reg"), reset, varResetVal,
-        nullptr);
+        varLoc, b.create<sv::ReadInOutOp>(varLoc, varNextState), clock, reset,
+        varResetVal, b.getStringAttr(variableOp.getName() + "_reg"));
     variableToRegister[variableOp] = variableReg;
     variableNextStateWires[variableOp] = varNextState;
     // Postpone value replacement until all logic has been created.
@@ -483,10 +483,11 @@ LogicalResult MachineOpConverter::dispatch() {
   // 4/5) Create next-state assignments for each output.
   llvm::SmallVector<CaseMuxItem, 4> outputCaseAssignments;
   auto hwPortList = hwModuleOp.getPortList();
-  for (size_t portIndex = 0; portIndex < machineOp.getNumResults();
-       portIndex++) {
-    auto outputPort = hwPortList.atOutput(portIndex);
-    auto outputPortType = outputPort.type;
+  size_t portIndex = 0;
+  for (auto &port : hwPortList) {
+    if (!port.isOutput())
+      continue;
+    auto outputPortType = port.type;
     CaseMuxItem outputAssignment;
     outputAssignment.wire = b.create<sv::RegOp>(
         machineOp.getLoc(), outputPortType,
@@ -497,6 +498,7 @@ LogicalResult MachineOpConverter::dispatch() {
           stateConvResults[state].outputs[portIndex]};
 
     outputCaseAssignments.push_back(outputAssignment);
+    ++portIndex;
   }
 
   // Create next-state maps for the FSM variables.

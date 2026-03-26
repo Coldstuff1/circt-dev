@@ -20,9 +20,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PriorityQueue.h"
@@ -472,7 +472,7 @@ parseComponentSignature(OpAsmParser &parser, OperationState &result,
   SmallVector<Attribute> portNames;
   auto getPortName = [context](const auto &port) -> StringAttr {
     StringRef name = port.ssaName.name;
-    if (name.startswith("%"))
+    if (name.starts_with("%"))
       name = name.drop_front();
     return StringAttr::get(context, name);
   };
@@ -1674,7 +1674,7 @@ verifyPrimitiveOpType(PrimitiveOp instance,
            << "'.";
 
   // Verify the instance result ports with those of its referenced component.
-  hw::ModulePortInfo primitivePorts = referencedPrimitive.getPortList();
+  auto primitivePorts = referencedPrimitive.getPortList();
   size_t numPorts = primitivePorts.size();
 
   size_t numResults = instance.getNumResults();
@@ -1717,7 +1717,7 @@ verifyPrimitiveOpType(PrimitiveOp instance,
 
   for (size_t i = 0; i != numResults; ++i) {
     auto resultType = instance.getResult(i).getType();
-    auto expectedType = primitivePorts.at(i).type;
+    auto expectedType = primitivePorts[i].type;
     auto replacedType = hw::evaluateParametricType(
         instance.getLoc(), instance.getParametersAttr(), expectedType);
     if (failed(replacedType))
@@ -1725,7 +1725,7 @@ verifyPrimitiveOpType(PrimitiveOp instance,
     if (resultType == replacedType)
       continue;
     return instance.emitOpError()
-           << "result type for " << primitivePorts.at(i).name << " must be "
+           << "result type for " << primitivePorts[i].name << " must be "
            << expectedType << ", but got " << resultType;
   }
   return success();
@@ -2848,21 +2848,6 @@ LogicalResult SliceLibOp::verify() {
            << inBits << ')' << " to be greater than output bits (" << outBits
            << ')';
   return success();
-}
-
-SmallVector<StringRef> MuxLibOp::portNames() {
-  return {"sel", "tru", "fal", "out"};
-}
-SmallVector<Direction> MuxLibOp::portDirections() {
-  return {Input, Input, Input, Output};
-}
-void MuxLibOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
-  getCellAsmResultNames(setNameFn, *this, this->portNames());
-}
-bool MuxLibOp::isCombinational() { return true; }
-SmallVector<DictionaryAttr> MuxLibOp::portAttributes() {
-  return {DictionaryAttr::get(getContext()), DictionaryAttr::get(getContext()),
-          DictionaryAttr::get(getContext()), DictionaryAttr::get(getContext())};
 }
 
 #define ImplBinPipeOpCellInterface(OpType, outName)                            \

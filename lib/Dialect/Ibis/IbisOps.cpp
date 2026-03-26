@@ -7,13 +7,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Ibis/IbisOps.h"
+#include "circt/Dialect/DC/DCTypes.h"
 #include "circt/Support/ParsingUtils.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -24,7 +25,7 @@ using namespace ibis;
 // parent scope of the provided `base` operation.
 template <typename T>
 static T lookupInModule(Operation *base, FlatSymbolRefAttr sym,
-                        SymbolTable *symbolTable) {
+                        const SymbolTable *symbolTable) {
   auto mod = base->getParentOfType<mlir::ModuleOp>();
   if (symbolTable)
     return dyn_cast<T>(symbolTable->lookupSymbolIn(mod, sym));
@@ -57,7 +58,7 @@ static llvm::raw_string_ostream &genValueName(llvm::raw_string_ostream &os,
       .Case<ThisOp>([&](auto op) { os << "this"; })
       .Case<InstanceOp, ContainerInstanceOp>(
           [&](auto op) { os << op.getInstanceNameAttr().strref(); })
-      .Case<PortOpInterface>([&](auto op) { os << op.getPortName(); })
+      .Case<PortOpInterface>([&](auto op) { os << op.getPortName().strref(); })
       .Case<PathOp>([&](auto op) {
         llvm::interleave(
             op.getPathAsRange(), os,
@@ -122,12 +123,15 @@ LogicalResult circt::ibis::detail::verifyScopeOpInterface(Operation *op) {
 // MethodOp
 //===----------------------------------------------------------------------===//
 
-ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
+template <typename TOp>
+ParseResult parseMethodLikeOp(OpAsmParser &parser, OperationState &result) {
   // Parse the name as a symbol.
   StringAttr nameAttr;
-  if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
-                             result.attributes))
+  if (parser.parseSymbolName(nameAttr))
     return failure();
+
+  result.attributes.append(hw::InnerSymbolTable::getInnerSymbolAttrName(),
+                           hw::InnerSymAttr::get(nameAttr));
 
   // Parse the function signature.
   SmallVector<OpAsmParser::Argument, 4> args;
@@ -143,13 +147,9 @@ ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
                                /*allowType=*/true, /*allowAttrs=*/false))
     return failure();
 
-  // Parse the result type.
-  if (succeeded(parser.parseOptionalArrow())) {
-    Type resultType;
-    if (parser.parseType(resultType))
-      return failure();
-    resultTypes.push_back(resultType);
-  }
+  // Parse the result types
+  if (parser.parseOptionalArrowTypeList(resultTypes))
+    return failure();
 
   // Process the ssa args for the information we're looking for.
   SmallVector<Type> argTypes;
@@ -168,33 +168,41 @@ ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
 
   result.addAttribute("argNames", ArrayAttr::get(context, argNames));
-  result.addAttribute(MethodOp::getFunctionTypeAttrName(result.name),
-                      functionType);
+  result.addAttribute(TOp::getFunctionTypeAttrName(result.name), functionType);
 
   // Parse the function body.
   auto *body = result.addRegion();
   if (parser.parseRegion(*body, args))
     return failure();
 
-  ensureTerminator(*body, parser.getBuilder(), result.location);
   return success();
 }
 
-void MethodOp::print(OpAsmPrinter &p) {
-  FunctionType funcTy = getFunctionType();
+template <typename TOp>
+void printMethodLikeOp(TOp op, OpAsmPrinter &p) {
+  FunctionType funcTy = op.getFunctionType();
   p << ' ';
-  p.printSymbolName(getSymName());
-  function_interface_impl::printFunctionSignature(
-      p, *this, funcTy.getInputs(), /*isVariadic=*/false, funcTy.getResults());
-  p.printOptionalAttrDictWithKeyword(getOperation()->getAttrs(),
-                                     getAttributeNames());
-  Region &body = getBody();
+  p.printSymbolName(op.getInnerSym().getSymName());
+  Region &body = op.getBody();
+  p << "(";
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ") ";
+  p.printArrowTypeList(funcTy.getResults());
+  p.printOptionalAttrDictWithKeyword(op.getOperation()->getAttrs(),
+                                     op.getAttributeNames());
   if (!body.empty()) {
     p << ' ';
     p.printRegion(body, /*printEntryBlockArgs=*/false,
                   /*printBlockTerminators=*/true);
   }
 }
+
+ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseMethodLikeOp<MethodOp>(parser, result);
+}
+
+void MethodOp::print(OpAsmPrinter &p) { return printMethodLikeOp(*this, p); }
 
 void MethodOp::getAsmBlockArgumentNames(mlir::Region &region,
                                         OpAsmSetValueNameFn setNameFn) {
@@ -210,38 +218,39 @@ void MethodOp::getAsmBlockArgumentNames(mlir::Region &region,
       setNameFn(block->getArgument(idx), argName);
 }
 
-LogicalResult MethodOp::verify() {
-  // Check that we have only one return value.
-  if (getFunctionType().getNumResults() > 1)
-    return failure();
-  return success();
+//===----------------------------------------------------------------------===//
+// DataflowMethodOp
+//===----------------------------------------------------------------------===//
+
+ParseResult DataflowMethodOp::parse(OpAsmParser &parser,
+                                    OperationState &result) {
+  return parseMethodLikeOp<DataflowMethodOp>(parser, result);
 }
+
+void DataflowMethodOp::print(OpAsmPrinter &p) {
+  return printMethodLikeOp(*this, p);
+}
+
+//===----------------------------------------------------------------------===//
+// ReturnOp
+//===----------------------------------------------------------------------===//
 
 void ReturnOp::build(OpBuilder &odsBuilder, OperationState &odsState) {}
 
 LogicalResult ReturnOp::verify() {
   // Check that the return operand type matches the function return type.
-  auto func = cast<MethodOp>((*this)->getParentOp());
-  ArrayRef<Type> resTypes = func.getResultTypes();
-  assert(resTypes.size() <= 1);
-  assert(getNumOperands() <= 1);
+  auto methodLike = cast<MethodLikeOpInterface>((*this)->getParentOp());
+  ArrayRef<Type> resTypes = methodLike.getResultTypes();
 
-  if (resTypes.empty()) {
-    if (getNumOperands() != 0)
-      return emitOpError(
-          "cannot return a value from a function with no result type");
-    return success();
-  }
+  if (getNumOperands() != resTypes.size())
+    return emitOpError(
+        "must have the same number of operands as the method has results");
 
-  Value retValue = getRetValue();
-  if (!retValue)
-    return emitOpError("must return a value");
-
-  Type retType = retValue.getType();
-  if (retType != resTypes.front())
-    return emitOpError("return type (")
-           << retType << ") must match function return type ("
-           << resTypes.front() << ")";
+  for (auto [arg, resType] : llvm::zip(getOperands(), resTypes))
+    if (arg.getType() != resType)
+      return emitOpError("operand type (")
+             << arg.getType() << ") must match function return type ("
+             << resType << ")";
 
   return success();
 }
@@ -250,17 +259,18 @@ LogicalResult ReturnOp::verify() {
 // GetVarOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult GetVarOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto varOp = getTarget(&symbolTable.getSymbolTable(
-      getOperation()->getParentOfType<mlir::ModuleOp>()));
+LogicalResult GetVarOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
+  ScopeRefType parentType = getInstance().getType().cast<ScopeRefType>();
+  auto varOp = ns.lookupOp<VarOp>(hw::InnerRefAttr::get(
+      parentType.getScopeRef().getAttr(), getVarNameAttr().getAttr()));
 
-  if (failed(varOp))
+  if (!varOp)
     return failure();
 
   // Ensure that the dereferenced type is the same type as the variable type.
-  if (varOp->getType() != getType())
+  if (varOp.getType() != getType())
     return emitOpError() << "dereferenced type (" << getType()
-                         << ") must match variable type (" << varOp->getType()
+                         << ") must match variable type (" << varOp.getType()
                          << ")";
 
   return success();
@@ -300,7 +310,7 @@ LogicalResult InstanceOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-ClassOp InstanceOp::getClass(SymbolTable *symbolTable) {
+ClassOp InstanceOp::getClass(const SymbolTable *symbolTable) {
   return lookupInModule<ClassOp>(getOperation(), getTargetNameAttr(),
                                  symbolTable);
 }
@@ -313,23 +323,15 @@ void InstanceOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 // GetPortOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult GetPortOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+LogicalResult GetPortOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
   // Lookup the target module type of the instance class reference.
-  ModuleOp mod = getOperation()->getParentOfType<ModuleOp>();
   ScopeRefType crt = getInstance().getType().cast<ScopeRefType>();
-  // @teqdruid TODO: make this more efficient using
-  // innersymtablecollection when that's available to non-firrtl dialects.
-  ScopeOpInterface targetScope =
-      symbolTable.lookupSymbolIn<ScopeOpInterface>(mod, crt.getScopeRef());
-  assert(targetScope && "should have been verified by the type system");
-  // @teqdruid TODO: make this more efficient using
-  // innersymtablecollection when that's available to non-firrtl dialects.
-  Operation *targetOp = targetScope.lookupPort(getPortSymbol());
+  Operation *targetOp = ns.lookupOp(hw::InnerRefAttr::get(
+      crt.getScopeRef().getAttr(), getPortSymbolAttr().getAttr()));
 
   if (!targetOp)
     return emitOpError() << "port '" << getPortSymbolAttr()
-                         << "' does not exist in "
-                         << targetScope.getScopeName();
+                         << "' does not exist in " << crt.getScopeRef();
 
   auto portOp = dyn_cast<PortOpInterface>(targetOp);
   if (!portOp)
@@ -350,13 +352,14 @@ LogicalResult GetPortOp::canonicalize(GetPortOp op, PatternRewriter &rewriter) {
   // Canonicalize away get_port on %this in favor of using the port SSA value
   // directly.
   // get_port(%this, @P) -> ibis.port.#
-  auto parentScope = cast<ScopeOpInterface>(op->getParentOp());
-  auto scopeThis = parentScope.getThis();
-
-  if (op.getInstance() == scopeThis) {
-    auto definingPort = parentScope.lookupPort(op.getPortSymbol());
-    rewriter.replaceOp(op, {definingPort.getPort()});
-    return success();
+  auto parentScope = dyn_cast<ScopeOpInterface>(op->getParentOp());
+  if (parentScope) {
+    auto scopeThis = parentScope.getThis();
+    if (op.getInstance() == scopeThis) {
+      auto definingPort = parentScope.lookupPort(op.getPortSymbol());
+      rewriter.replaceOp(op, {definingPort.getPort()});
+      return success();
+    }
   }
 
   return failure();
@@ -370,7 +373,7 @@ void GetPortOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 // ThisOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult ThisOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+LogicalResult ThisOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
   // A thisOp should always refer to the parent operation, which in turn should
   // be an Ibis ScopeOpInterface.
   auto parentScope =
@@ -402,7 +405,7 @@ void PortReadOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 // ContainerInstanceOp
 //===----------------------------------------------------------------------===//
 
-ContainerOp ContainerInstanceOp::getContainer(SymbolTable *symbolTable) {
+ContainerOp ContainerInstanceOp::getContainer(const SymbolTable *symbolTable) {
   auto mod = getOperation()->getParentOfType<mlir::ModuleOp>();
   if (symbolTable)
     return dyn_cast_or_null<ContainerOp>(
@@ -499,11 +502,10 @@ LogicalResult PathOp::canonicalize(PathOp op, PatternRewriter &rewriter) {
   PathStepAttr firstStep = *range.begin();
   if (pathSize == 1 && firstStep.getDirection() == PathDirection::Child) {
     auto parentScope = cast<ScopeOpInterface>(op->getParentOp());
-    Operation *childInstance =
-        SymbolTable::lookupSymbolIn(parentScope, firstStep.getChild());
+    auto childInstance = dyn_cast_or_null<ContainerInstanceOp>(
+        parentScope.lookupInnerSym(firstStep.getChild().getValue()));
     assert(childInstance && "should have been verified by the op verifier");
-    rewriter.replaceOp(op,
-                       {cast<ContainerInstanceOp>(childInstance).getResult()});
+    rewriter.replaceOp(op, {childInstance.getResult()});
     return success();
   }
 
@@ -586,6 +588,232 @@ LogicalResult OutputWireOp::canonicalize(OutputWireOp op,
   }
 
   return failure();
+}
+
+//===----------------------------------------------------------------------===//
+// StaticBlockOp
+//===----------------------------------------------------------------------===//
+
+template <typename TOp>
+static ParseResult parseBlockLikeOp(
+    OpAsmParser &parser, OperationState &result,
+    llvm::function_ref<ParseResult(OpAsmParser::Argument &)> argAdjuster = {}) {
+  // Parse the argument initializer list.
+  llvm::SmallVector<OpAsmParser::UnresolvedOperand> inputOperands;
+  llvm::SmallVector<OpAsmParser::Argument> inputArguments;
+  llvm::SmallVector<Type> inputTypes;
+  ArrayAttr inputNames;
+  if (parsing_util::parseInitializerList(parser, inputArguments, inputOperands,
+                                         inputTypes, inputNames))
+    return failure();
+
+  // Parse the result types.
+  llvm::SmallVector<Type> resultTypes;
+  if (parser.parseOptionalArrowTypeList(resultTypes))
+    return failure();
+  result.addTypes(resultTypes);
+
+  // Parse the attribute dict.
+  if (failed(parser.parseOptionalAttrDictWithKeyword(result.attributes)))
+    return failure();
+
+  // All operands have been parsed - resolve.
+  if (parser.resolveOperands(inputOperands, inputTypes, parser.getNameLoc(),
+                             result.operands))
+    return failure();
+
+  // If the user provided an arg adjuster, apply it to each argument.
+  if (argAdjuster) {
+    for (auto &arg : inputArguments)
+      if (failed(argAdjuster(arg)))
+        return failure();
+  }
+
+  // Parse the body region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body, inputArguments))
+    return failure();
+
+  TOp::ensureTerminator(*body, parser.getBuilder(), result.location);
+  return success();
+}
+
+template <typename T>
+static void printBlockLikeOp(T op, OpAsmPrinter &p) {
+  p << ' ';
+  parsing_util::printInitializerList(p, op.getInputs(),
+                                     op.getBodyBlock()->getArguments());
+  p.printOptionalArrowTypeList(op.getResultTypes());
+  p.printOptionalAttrDictWithKeyword(op.getOperation()->getAttrs());
+  p << ' ';
+  p.printRegion(op.getBody(), /*printEntryBlockArgs=*/false);
+}
+
+LogicalResult StaticBlockOp::verify() {
+  if (getInputs().size() != getBodyBlock()->getNumArguments())
+    return emitOpError("number of inputs must match number of block arguments");
+
+  for (auto [arg, barg] :
+       llvm::zip(getInputs(), getBodyBlock()->getArguments())) {
+    if (arg.getType() != barg.getType())
+      return emitOpError("block argument type must match input type");
+  }
+
+  return success();
+}
+
+ParseResult StaticBlockOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseBlockLikeOp<StaticBlockOp>(parser, result);
+}
+
+void StaticBlockOp::print(OpAsmPrinter &p) {
+  return printBlockLikeOp(*this, p);
+}
+
+//===----------------------------------------------------------------------===//
+// IsolatedStaticBlockOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IsolatedStaticBlockOp::verify() {
+  if (getInputs().size() != getBodyBlock()->getNumArguments())
+    return emitOpError("number of inputs must match number of block arguments");
+
+  for (auto [arg, barg] :
+       llvm::zip(getInputs(), getBodyBlock()->getArguments())) {
+    if (arg.getType() != barg.getType())
+      return emitOpError("block argument type must match input type");
+  }
+
+  return success();
+}
+
+ParseResult IsolatedStaticBlockOp::parse(OpAsmParser &parser,
+                                         OperationState &result) {
+  return parseBlockLikeOp<IsolatedStaticBlockOp>(parser, result);
+}
+
+void IsolatedStaticBlockOp::print(OpAsmPrinter &p) {
+  return printBlockLikeOp(*this, p);
+}
+
+//===----------------------------------------------------------------------===//
+// DCBlockOp
+//===----------------------------------------------------------------------===//
+
+void DCBlockOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                      TypeRange outputs, ValueRange inputs,
+                      IntegerAttr maxThreads) {
+  odsState.addOperands(inputs);
+  if (maxThreads)
+    odsState.addAttribute(getMaxThreadsAttrName(odsState.name), maxThreads);
+  auto *region = odsState.addRegion();
+  llvm::SmallVector<Type> resTypes;
+  for (auto output : outputs) {
+    dc::ValueType dcType = output.dyn_cast<dc::ValueType>();
+    assert(dcType && "DCBlockOp outputs must be dc::ValueType");
+    resTypes.push_back(dcType);
+  }
+  odsState.addTypes(resTypes);
+  ensureTerminator(*region, odsBuilder, odsState.location);
+  llvm::SmallVector<Location> argLocs;
+  llvm::SmallVector<Type> argTypes;
+  for (auto input : inputs) {
+    argLocs.push_back(input.getLoc());
+    dc::ValueType dcType = input.getType().dyn_cast<dc::ValueType>();
+    assert(dcType && "DCBlockOp inputs must be dc::ValueType");
+    argTypes.push_back(dcType.getInnerType());
+  }
+  region->front().addArguments(argTypes, argLocs);
+}
+
+LogicalResult DCBlockOp::verify() {
+  if (getInputs().size() != getBodyBlock()->getNumArguments())
+    return emitOpError("number of inputs must match number of block arguments");
+
+  for (auto [arg, barg] :
+       llvm::zip(getInputs(), getBodyBlock()->getArguments())) {
+    dc::ValueType dcType = arg.getType().dyn_cast<dc::ValueType>();
+    if (!dcType)
+      return emitOpError("DCBlockOp inputs must be dc::ValueType but got ")
+             << arg.getType();
+
+    if (dcType.getInnerType() != barg.getType())
+      return emitOpError("block argument type must match input type. Got ")
+             << barg.getType() << " expected " << dcType.getInnerType();
+  }
+
+  return success();
+}
+
+ParseResult DCBlockOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseBlockLikeOp<DCBlockOp>(
+      parser, result, [&](OpAsmParser::Argument &arg) -> LogicalResult {
+        dc::ValueType valueType = arg.type.dyn_cast<dc::ValueType>();
+        if (!valueType)
+          return parser.emitError(parser.getCurrentLocation(),
+                                  "DCBlockOp inputs must be dc::ValueType");
+        arg.type = valueType.getInnerType();
+        return success();
+      });
+}
+
+void DCBlockOp::print(OpAsmPrinter &p) { return printBlockLikeOp(*this, p); }
+
+//===----------------------------------------------------------------------===//
+// BlockReturnOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult BlockReturnOp::verify() {
+  Operation *parent = getOperation()->getParentOp();
+  auto parentBlock = dyn_cast<BlockOpInterface>(parent);
+  if (!parentBlock)
+    return emitOpError("must be nested in a block");
+
+  if (getNumOperands() != parent->getNumResults())
+    return emitOpError("number of operands must match number of block outputs");
+
+  for (auto [op, out] :
+       llvm::zip(getOperands(), parentBlock.getInternalResultTypes())) {
+    if (op.getType() != out)
+      return emitOpError(
+                 "operand type must match parent block output type. Expected ")
+             << out << " got " << op.getType();
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// InlineStaticBlockEndOp
+//===----------------------------------------------------------------------===//
+
+InlineStaticBlockBeginOp InlineStaticBlockEndOp::getBeginOp() {
+  auto curr = getOperation()->getReverseIterator();
+  Operation *firstOp = &getOperation()->getBlock()->front();
+  while (true) {
+    if (auto beginOp = dyn_cast<InlineStaticBlockBeginOp>(*curr))
+      return beginOp;
+    if (curr.getNodePtr() == firstOp)
+      break;
+    ++curr;
+  }
+  return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// InlineStaticBlockBeginOp
+//===----------------------------------------------------------------------===//
+
+InlineStaticBlockEndOp InlineStaticBlockBeginOp::getEndOp() {
+  auto curr = getOperation()->getIterator();
+  auto end = getOperation()->getBlock()->end();
+  while (curr != end) {
+    if (auto endOp = dyn_cast<InlineStaticBlockEndOp>(*curr))
+      return endOp;
+
+    ++curr;
+  }
+  return nullptr;
 }
 
 //===----------------------------------------------------------------------===//

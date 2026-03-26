@@ -10,6 +10,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifndef CIRCT_DIALECT_SEQ_SEQTYPES
+#define CIRCT_DIALECT_SEQ_SEQTYPES
+
+include "circt/Dialect/Seq/SeqDialect.td"
 include "mlir/IR/BuiltinTypeInterfaces.td"
 
 class SeqType<string name, list<Trait> traits = []> : TypeDef<SeqDialect, name, traits> { }
@@ -27,7 +31,7 @@ def HLMemType : SeqType<"HLMem",[
     The HLMemType represents the type of an addressable memory structure. The
     type is inherently multidimensional. Dimensions must be known integer values.
 
-    Note: unidimensional memories are represented as <1x{element type}> - 
+    Note: unidimensional memories are represented as <1x{element type}> -
     <{element type}> is illegal.
   }];
 
@@ -88,3 +92,5 @@ def ClockType : SeqType<"Clock"> {
   }];
   let mnemonic = "clock";
 }
+
+#endif // CIRCT_DIALECT_SEQ_SEQTYPES

@@ -13,9 +13,9 @@
 #include "circt/Dialect/Ibis/IbisPasses.h"
 #include "circt/Dialect/Ibis/IbisTypes.h"
 
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Support/BackedgeBuilder.h"
-#include "circt/Support/ConversionPatterns.h"
 
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -50,8 +50,9 @@ struct CallPrepPrecomputed {
   // Utility function to create a symbolref to a method.
   static SymbolRefAttr getSymbol(MethodOp method) {
     ClassOp cls = method.getParentOp();
-    return SymbolRefAttr::get(cls.getSymNameAttr(),
-                              {FlatSymbolRefAttr::get(method)});
+    return SymbolRefAttr::get(
+        cls.getSymNameAttr(),
+        {FlatSymbolRefAttr::get(method.getContext(), *method.getInnerName())});
   }
 };
 
@@ -70,7 +71,8 @@ CallPrepPrecomputed::CallPrepPrecomputed(ModuleOp mod) {
       SmallVector<hw::StructType::FieldInfo> argFields;
       for (auto [argName, argType] :
            llvm::zip(method.getArgNamesAttr().getAsRange<StringAttr>(),
-                     method.getArgumentTypes()))
+                     cast<MethodLikeOpInterface>(method.getOperation())
+                         .getArgumentTypes()))
         argFields.push_back({argName, argType});
       auto argStruct = hw::StructType::get(ctxt, argFields);
 
@@ -95,7 +97,7 @@ CallPrepPrecomputed::CallPrepPrecomputed(ModuleOp mod) {
       auto clsEntry = classSymbols.find(inst.getTargetNameAttr().getAttr());
       assert(clsEntry != classSymbols.end() &&
              "class being instantiated doesn't exist");
-      instanceMap[std::make_pair(cls, inst.getSymNameAttr())] =
+      instanceMap[std::make_pair(cls, inst.getInnerSym().getSymName())] =
           clsEntry->second;
     }
   }
@@ -145,11 +147,11 @@ void MergeCallArgs::rewrite(CallOp call, OpAdaptor adaptor,
                             ConversionPatternRewriter &rewriter) const {
   auto loc = call.getLoc();
   rewriter.setInsertionPoint(call);
-  auto func = call->getParentOfType<mlir::FunctionOpInterface>();
+  auto method = call->getParentOfType<ibis::MethodLikeOpInterface>();
 
   // Use the 'info' accelerator structures to find the argument type.
   SymbolRefAttr calleeSym =
-      info.resolveInstancePath(func, adaptor.getCalleeAttr());
+      info.resolveInstancePath(method, adaptor.getCalleeAttr());
   auto argStructEntry = info.argTypes.find(calleeSym);
   assert(argStructEntry != info.argTypes.end() && "Method symref not found!");
   auto [argStruct, argLoc] = argStructEntry->second;
@@ -160,7 +162,8 @@ void MergeCallArgs::rewrite(CallOp call, OpAdaptor adaptor,
   newArg->setAttr("sv.namehint",
                   rewriter.getStringAttr(
                       call.getCalleeAttr().getLeafReference().getValue() +
-                      "_args_called_from_" + func.getName()));
+                      "_args_called_from_" +
+                      method.getMethodName().getValue()));
 
   // Update the call to use just the new struct.
   rewriter.updateRootInPlace(call, [&]() {
@@ -202,14 +205,14 @@ void MergeMethodArgs::rewrite(MethodOp func, OpAdaptor adaptor,
       FunctionType::get(ctxt, {argStruct}, funcType.getResults());
   auto newArgNames = ArrayAttr::get(ctxt, {StringAttr::get(ctxt, "arg")});
   auto newMethod =
-      rewriter.create<MethodOp>(loc, func.getSymNameAttr(), newFuncType,
+      rewriter.create<MethodOp>(loc, func.getInnerSym(), newFuncType,
                                 newArgNames, ArrayAttr(), ArrayAttr());
 
   if (func->getNumRegions() > 0) {
     // Create a body block with a struct explode to the arg struct into the
     // original arguments.
-    Block *b = rewriter.createBlock(&newMethod.getBodyRegion(), {}, {argStruct},
-                                    {argLoc});
+    Block *b =
+        rewriter.createBlock(&newMethod.getRegion(), {}, {argStruct}, {argLoc});
     rewriter.setInsertionPointToStart(b);
     auto replacementArgs =
         rewriter.create<hw::StructExplodeOp>(loc, b->getArgument(0));

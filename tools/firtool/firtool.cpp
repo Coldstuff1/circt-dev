@@ -15,6 +15,7 @@
 #include "circt/Conversion/ExportVerilog.h"
 #include "circt/Conversion/Passes.h"
 #include "circt/Dialect/Comb/CombDialect.h"
+#include "circt/Dialect/Debug/DebugDialect.h"
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRParser.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
@@ -26,14 +27,17 @@
 #include "circt/Dialect/LTL/LTLDialect.h"
 #include "circt/Dialect/OM/OMDialect.h"
 #include "circt/Dialect/OM/OMOps.h"
+#include "circt/Dialect/OM/OMPasses.h"
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Dialect/Seq/SeqDialect.h"
+#include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/Verif/VerifDialect.h"
 #include "circt/Support/LoweringOptions.h"
 #include "circt/Support/LoweringOptionsParser.h"
 #include "circt/Support/Passes.h"
 #include "circt/Support/Version.h"
+#include "circt/Target/DebugInfo.h"
 #include "circt/Transforms/Passes.h"
 #include "mlir/Bytecode/BytecodeReader.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
@@ -44,9 +48,11 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassInstrumentation.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Support/Timing.h"
 #include "mlir/Support/ToolUtilities.h"
+#include "mlir/Tools/Plugins/PassPlugin.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/Chrono.h"
 #include "llvm/Support/CommandLine.h"
@@ -80,10 +86,6 @@ static cl::opt<std::string> inputFilename(cl::Positional,
                                           cl::desc("<input file>"),
                                           cl::init("-"), cl::cat(mainCategory));
 
-static cl::opt<std::string> outputFilename(
-    "o", cl::desc("Output filename, or directory for split output"),
-    cl::value_desc("filename"), cl::init("-"), cl::cat(mainCategory));
-
 static cl::opt<bool>
     splitInputFile("split-input-file",
                    cl::desc("Split the input file into pieces and process each "
@@ -106,22 +108,6 @@ static cl::opt<bool>
                                "expected-* lines on the corresponding line"),
                       cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
-static cl::opt<bool> disableAnnotationsClassless(
-    "disable-annotation-classless",
-    cl::desc("Ignore annotations without a class when parsing"),
-    cl::init(false), cl::cat(mainCategory));
-
-static cl::opt<bool> disableAnnotationsUnknown(
-    "disable-annotation-unknown",
-    cl::desc("Ignore unknown annotations when parsing"), cl::init(false),
-    cl::cat(mainCategory));
-
-static cl::opt<bool> lowerAnnotationsNoRefTypePorts(
-    "lower-annotations-no-ref-type-ports",
-    cl::desc("Create real ports instead of ref type ports when resolving "
-             "wiring problems inside the LowerAnnotations pass"),
-    cl::init(false), cl::Hidden, cl::cat(mainCategory));
-
 using InfoLocHandling = firrtl::FIRParserOptions::InfoLocHandling;
 static cl::opt<InfoLocHandling> infoLocHandling(
     cl::desc("Location tracking:"),
@@ -135,22 +121,43 @@ static cl::opt<InfoLocHandling> infoLocHandling(
             "Use @info locations when present, fallback to .fir locations")),
     cl::init(InfoLocHandling::PreferInfo), cl::cat(mainCategory));
 
-static cl::opt<bool> exportModuleHierarchy(
-    "export-module-hierarchy",
-    cl::desc("Export module and instance hierarchy as JSON"), cl::init(false),
-    cl::cat(mainCategory));
-
 static cl::opt<bool>
-    scalarizeTopModule("scalarize-top-module",
-                       cl::desc("Scalarize the ports of the top module"),
-                       cl::init(true), cl::cat(mainCategory));
+    scalarizePublicModules("scalarize-public-modules",
+                           cl::desc("Scalarize all public modules"),
+                           cl::init(true), cl::cat(mainCategory));
 
 static cl::opt<bool>
     scalarizeExtModules("scalarize-ext-modules",
                         cl::desc("Scalarize the ports of any external modules"),
                         cl::init(true), cl::cat(mainCategory));
 
-static firtool::FirtoolOptions firtoolOptions(mainCategory);
+static cl::list<std::string>
+    passPlugins("load-pass-plugin", cl::desc("Load passes from plugin library"),
+                cl::CommaSeparated, cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    highFIRRTLPassPlugin("high-firrtl-pass-plugin",
+                         cl::desc("Insert passes after parsing FIRRTL. Specify "
+                                  "passes with MLIR textual format."),
+                         cl::init(""), cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    lowFIRRTLPassPlugin("low-firrtl-pass-plugin",
+                        cl::desc("Insert passes before lowering to HW. Specify "
+                                 "passes with MLIR textual format."),
+                        cl::init(""), cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    hwPassPlugin("hw-pass-plugin",
+                 cl::desc("Insert passes after lowering to HW. Specify "
+                          "passes with MLIR textual format."),
+                 cl::init(""), cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    svPassPlugin("sv-pass-plugin",
+                 cl::desc("Insert passes after lowering to SV. Specify "
+                          "passes with MLIR textual format."),
+                 cl::init(""), cl::cat(mainCategory));
 
 enum OutputFormatKind {
   OutputParseOnly,
@@ -201,6 +208,30 @@ static cl::opt<std::string>
                 cl::init(""), cl::value_desc("filename"),
                 cl::cat(mainCategory));
 
+static cl::opt<bool> emitHGLDD("emit-hgldd", cl::desc("Emit HGLDD debug info"),
+                               cl::init(false), cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    hglddSourcePrefix("hgldd-source-prefix",
+                      cl::desc("Prefix for source file paths in HGLDD output"),
+                      cl::init(""), cl::value_desc("path"),
+                      cl::cat(mainCategory));
+
+static cl::opt<std::string>
+    hglddOutputPrefix("hgldd-output-prefix",
+                      cl::desc("Prefix for output file paths in HGLDD output"),
+                      cl::init(""), cl::value_desc("path"),
+                      cl::cat(mainCategory));
+
+static cl::opt<std::string> hglddOutputDirectory(
+    "hgldd-output-dir", cl::desc("Directory into which to emit HGLDD files"),
+    cl::init(""), cl::value_desc("path"), cl::cat(mainCategory));
+
+static cl::opt<bool> hglddOnlyExistingFileLocs(
+    "hgldd-only-existing-file-locs",
+    cl::desc("Only consider locations in files that exist on disk"),
+    cl::init(false), cl::cat(mainCategory));
+
 static cl::opt<bool>
     emitBytecode("emit-bytecode",
                  cl::desc("Emit bytecode when generating MLIR output"),
@@ -213,16 +244,6 @@ static cl::opt<bool>
     verbosePassExecutions("verbose-pass-executions",
                           cl::desc("Log executions of toplevel module passes"),
                           cl::init(false), cl::cat(mainCategory));
-
-static cl::opt<bool> stripFirDebugInfo(
-    "strip-fir-debug-info",
-    cl::desc("Disable source fir locator information in output Verilog"),
-    cl::init(true), cl::cat(mainCategory));
-
-static cl::opt<bool> stripDebugInfo(
-    "strip-debug-info",
-    cl::desc("Disable source locator information in output Verilog"),
-    cl::init(false), cl::cat(mainCategory));
 
 static LoweringOptionsOption loweringOptions(mainCategory);
 
@@ -249,10 +270,43 @@ static LogicalResult printOp(Operation *op, raw_ostream &os) {
   return success();
 }
 
+static debug::EmitHGLDDOptions getHGLDDOptions() {
+  debug::EmitHGLDDOptions opts;
+  opts.sourceFilePrefix = hglddSourcePrefix;
+  opts.outputFilePrefix = hglddOutputPrefix;
+  opts.outputDirectory = hglddOutputDirectory;
+  opts.onlyExistingFileLocs = hglddOnlyExistingFileLocs;
+  return opts;
+}
+
+/// Wrapper pass to call the `emitHGLDD` translation.
+struct EmitHGLDDPass
+    : public PassWrapper<EmitHGLDDPass, OperationPass<mlir::ModuleOp>> {
+  llvm::raw_ostream &os;
+  EmitHGLDDPass(llvm::raw_ostream &os) : os(os) {}
+  void runOnOperation() override {
+    markAllAnalysesPreserved();
+    if (failed(debug::emitHGLDD(getOperation(), os, getHGLDDOptions())))
+      return signalPassFailure();
+  }
+};
+
+/// Wrapper pass to call the `emitSplitHGLDD` translation.
+struct EmitSplitHGLDDPass
+    : public PassWrapper<EmitSplitHGLDDPass, OperationPass<mlir::ModuleOp>> {
+  void runOnOperation() override {
+    markAllAnalysesPreserved();
+    if (failed(debug::emitSplitHGLDD(getOperation(), getHGLDDOptions())))
+      return signalPassFailure();
+  }
+};
+
 /// Process a single buffer of the input.
 static LogicalResult processBuffer(
-    MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
+    MLIRContext &context, firtool::FirtoolOptions &firtoolOptions,
+    TimingScope &ts, llvm::SourceMgr &sourceMgr,
     std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
+
   // Add the annotation file if one was explicitly specified.
   unsigned numAnnotationFiles = 0;
   for (const auto &inputAnnotationFilename : inputAnnotationFilenames) {
@@ -292,7 +346,7 @@ static LogicalResult processBuffer(
     firrtl::FIRParserOptions options;
     options.infoLocatorHandling = infoLocHandling;
     options.numAnnotationFiles = numAnnotationFiles;
-    options.scalarizeTopModule = scalarizeTopModule;
+    options.scalarizePublicModules = scalarizePublicModules;
     options.scalarizeExtModules = scalarizeExtModules;
     module = importFIRFile(sourceMgr, &context, parserTimer, options);
   } else {
@@ -323,14 +377,8 @@ static LogicalResult processBuffer(
   if (failed(applyPassManagerCLOptions(pm)))
     return failure();
 
-  // Legalize away "open" aggregates to hw-only versions.
-  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerOpenAggsPass());
-
-  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createResolvePathsPass());
-
-  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerFIRRTLAnnotationsPass(
-      disableAnnotationsUnknown, disableAnnotationsClassless,
-      lowerAnnotationsNoRefTypePorts));
+  if (failed(firtool::populatePreprocessTransforms(pm, firtoolOptions)))
+    return failure();
 
   // If the user asked for --parse-only, stop after running LowerAnnotations.
   if (outputFormat == OutputParseOnly) {
@@ -340,73 +388,78 @@ static LogicalResult processBuffer(
     return printOp(*module, (*outputFile)->os());
   }
 
-  if (failed(firtool::populateCHIRRTLToLowFIRRTL(pm, firtoolOptions, *module,
+  if (!highFIRRTLPassPlugin.empty())
+    if (failed(parsePassPipeline(StringRef(highFIRRTLPassPlugin), pm)))
+      return failure();
+
+  if (failed(firtool::populateCHIRRTLToLowFIRRTL(pm, firtoolOptions,
                                                  inputFilename)))
     return failure();
+
+  if (!lowFIRRTLPassPlugin.empty())
+    if (failed(parsePassPipeline(StringRef(lowFIRRTLPassPlugin), pm)))
+      return failure();
 
   // Lower if we are going to verilog or if lowering was specifically requested.
   if (outputFormat != OutputIRFir) {
     if (failed(firtool::populateLowFIRRTLToHW(pm, firtoolOptions)))
       return failure();
+    if (!hwPassPlugin.empty())
+      if (failed(parsePassPipeline(StringRef(hwPassPlugin), pm)))
+        return failure();
     if (outputFormat != OutputIRHW)
       if (failed(firtool::populateHWToSV(pm, firtoolOptions)))
         return failure();
+    if (!svPassPlugin.empty())
+      if (failed(parsePassPipeline(StringRef(svPassPlugin), pm)))
+        return failure();
   }
+
+  // If the user requested HGLDD debug info emission, enable Verilog location
+  // tracking.
+  if (emitHGLDD)
+    loweringOptions.emitVerilogLocations = true;
 
   // Load the emitter options from the command line. Command line options if
   // specified will override any module options.
-  if (loweringOptions.getNumOccurrences())
+  if (loweringOptions.toString() != LoweringOptions().toString())
     loweringOptions.setAsAttribute(module.get());
 
   // Add passes specific to Verilog emission if we're going there.
   if (outputFormat == OutputVerilog || outputFormat == OutputSplitVerilog ||
       outputFormat == OutputIRVerilog) {
-    // Legalize unsupported operations within the modules.
-    pm.nest<hw::HWModuleOp>().addPass(sv::createHWLegalizeModulesPass());
-
-    // Tidy up the IR to improve verilog emission quality.
-    if (!firtoolOptions.disableOptimization)
-      pm.nest<hw::HWModuleOp>().addPass(sv::createPrettifyVerilogPass());
-
-    if (stripFirDebugInfo)
-      pm.addPass(
-          circt::createStripDebugInfoWithPredPass([](mlir::Location loc) {
-            if (auto fileLoc = loc.dyn_cast<FileLineColLoc>())
-              return fileLoc.getFilename().getValue().endswith(".fir");
-            return false;
-          }));
-
-    if (stripDebugInfo)
-      pm.addPass(circt::createStripDebugInfoWithPredPass(
-          [](mlir::Location loc) { return true; }));
-
-    // Emit module and testbench hierarchy JSON files.
-    if (exportModuleHierarchy)
-      pm.addPass(sv::createHWExportModuleHierarchyPass(outputFilename));
-
-    // Check inner symbols and inner refs.
-    pm.addPass(hw::createVerifyInnerRefNamespacePass());
 
     // Emit a single file or multiple files depending on the output format.
     switch (outputFormat) {
     default:
       llvm_unreachable("can't reach this");
     case OutputVerilog:
-      pm.addPass(createExportVerilogPass((*outputFile)->os()));
+      if (failed(firtool::populateExportVerilog(pm, firtoolOptions,
+                                                (*outputFile)->os())))
+        return failure();
+      if (emitHGLDD)
+        pm.addPass(std::make_unique<EmitHGLDDPass>((*outputFile)->os()));
       break;
     case OutputSplitVerilog:
-      pm.addPass(createExportSplitVerilogPass(outputFilename));
+      if (failed(firtool::populateExportSplitVerilog(
+              pm, firtoolOptions, firtoolOptions.getOutputFilename())))
+        return failure();
+      if (emitHGLDD)
+        pm.addPass(std::make_unique<EmitSplitHGLDDPass>());
       break;
     case OutputIRVerilog:
       // Run the ExportVerilog pass to get its lowering, but discard the output.
-      pm.addPass(createExportVerilogPass(llvm::nulls()));
+      if (failed(firtool::populateExportVerilog(pm, firtoolOptions,
+                                                llvm::nulls())))
+        return failure();
       break;
     }
 
     // Run final IR mutations to clean it up after ExportVerilog and before
     // emitting the final MLIR.
     if (!mlirOutFile.empty())
-      pm.addPass(firrtl::createFinalizeIRPass());
+      if (failed(firtool::populateFinalizeIR(pm, firtoolOptions)))
+        return failure();
   }
 
   if (failed(pm.run(module.get())))
@@ -471,8 +524,8 @@ public:
 /// creates a regular or verifying diagnostic handler, depending on whether the
 /// user set the verifyDiagnostics option.
 static LogicalResult processInputSplit(
-    MLIRContext &context, TimingScope &ts,
-    std::unique_ptr<llvm::MemoryBuffer> buffer,
+    MLIRContext &context, firtool::FirtoolOptions &firtoolOptions,
+    TimingScope &ts, std::unique_ptr<llvm::MemoryBuffer> buffer,
     std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
@@ -481,23 +534,24 @@ static LogicalResult processInputSplit(
     SourceMgrDiagnosticHandler sourceMgrHandler(sourceMgr,
                                                 &context /*, shouldShow */);
     FileLineColLocsAsNotesDiagnosticHandler addLocs(&context);
-    return processBuffer(context, ts, sourceMgr, outputFile);
+    return processBuffer(context, firtoolOptions, ts, sourceMgr, outputFile);
   }
 
   SourceMgrDiagnosticVerifierHandler sourceMgrHandler(sourceMgr, &context);
   context.printOpOnDiagnostic(false);
-  (void)processBuffer(context, ts, sourceMgr, outputFile);
+  (void)processBuffer(context, firtoolOptions, ts, sourceMgr, outputFile);
   return sourceMgrHandler.verify();
 }
 
 /// Process the entire input provided by the user, splitting it up if the
 /// corresponding option was specified.
 static LogicalResult
-processInput(MLIRContext &context, TimingScope &ts,
-             std::unique_ptr<llvm::MemoryBuffer> input,
+processInput(MLIRContext &context, firtool::FirtoolOptions &firtoolOptions,
+             TimingScope &ts, std::unique_ptr<llvm::MemoryBuffer> input,
              std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
   if (!splitInputFile)
-    return processInputSplit(context, ts, std::move(input), outputFile);
+    return processInputSplit(context, firtoolOptions, ts, std::move(input),
+                             outputFile);
 
   // Emit an error if the user provides a separate annotation file alongside
   // split input. This is technically not a problem, but the user likely
@@ -515,7 +569,8 @@ processInput(MLIRContext &context, TimingScope &ts,
   return splitAndProcessBuffer(
       std::move(input),
       [&](std::unique_ptr<MemoryBuffer> buffer, raw_ostream &) {
-        return processInputSplit(context, ts, std::move(buffer), outputFile);
+        return processInputSplit(context, firtoolOptions, ts, std::move(buffer),
+                                 outputFile);
       },
       llvm::outs());
 }
@@ -523,7 +578,8 @@ processInput(MLIRContext &context, TimingScope &ts,
 /// This implements the top-level logic for the firtool command, invoked once
 /// command line options are parsed and LLVM/MLIR are all set up and ready to
 /// go.
-static LogicalResult executeFirtool(MLIRContext &context) {
+static LogicalResult executeFirtool(MLIRContext &context,
+                                    firtool::FirtoolOptions &firtoolOptions) {
   // Create the timing manager we use to sample execution times.
   DefaultTimingManager tm;
   applyDefaultTimingManagerCLOptions(tm);
@@ -539,10 +595,10 @@ static LogicalResult executeFirtool(MLIRContext &context) {
 
   // Figure out the input format if unspecified.
   if (inputFormat == InputUnspecified) {
-    if (StringRef(inputFilename).endswith(".fir"))
+    if (StringRef(inputFilename).ends_with(".fir"))
       inputFormat = InputFIRFile;
-    else if (StringRef(inputFilename).endswith(".mlir") ||
-             StringRef(inputFilename).endswith(".mlirbc") ||
+    else if (StringRef(inputFilename).ends_with(".mlir") ||
+             StringRef(inputFilename).ends_with(".mlirbc") ||
              mlir::isBytecode(*input))
       inputFormat = InputMLIRFile;
     else {
@@ -556,20 +612,23 @@ static LogicalResult executeFirtool(MLIRContext &context) {
   std::optional<std::unique_ptr<llvm::ToolOutputFile>> outputFile;
   if (outputFormat != OutputSplitVerilog) {
     // Create an output file.
-    outputFile.emplace(openOutputFile(outputFilename, &errorMessage));
+    outputFile.emplace(
+        openOutputFile(firtoolOptions.getOutputFilename(), &errorMessage));
     if (!(*outputFile)) {
       llvm::errs() << errorMessage << "\n";
       return failure();
     }
   } else {
     // Create an output directory.
-    if (outputFilename.isDefaultOption() || outputFilename == "-") {
+    if (firtoolOptions.isDefaultOutputFilename()) {
       llvm::errs() << "missing output directory: specify with -o=<dir>\n";
       return failure();
     }
-    auto error = llvm::sys::fs::create_directories(outputFilename);
+    auto error =
+        llvm::sys::fs::create_directories(firtoolOptions.getOutputFilename());
     if (error) {
-      llvm::errs() << "cannot create output directory '" << outputFilename
+      llvm::errs() << "cannot create output directory '"
+                   << firtoolOptions.getOutputFilename()
                    << "': " << error.message() << "\n";
       return failure();
     }
@@ -579,10 +638,11 @@ static LogicalResult executeFirtool(MLIRContext &context) {
   context.loadDialect<chirrtl::CHIRRTLDialect, firrtl::FIRRTLDialect,
                       hw::HWDialect, comb::CombDialect, seq::SeqDialect,
                       om::OMDialect, sv::SVDialect, verif::VerifDialect,
-                      ltl::LTLDialect>();
+                      ltl::LTLDialect, debug::DebugDialect, sim::SimDialect>();
 
   // Process the input.
-  if (failed(processInput(context, ts, std::move(input), outputFile)))
+  if (failed(processInput(context, firtoolOptions, ts, std::move(input),
+                          outputFile)))
     return failure();
 
   // If the result succeeded and we're emitting a file, close it.
@@ -607,6 +667,19 @@ int main(int argc, char **argv) {
   // MLIR options are added below.
   cl::HideUnrelatedOptions(mainCategory);
 
+  /// Set the callback to load a pass plugin.
+  passPlugins.setCallback([&](const std::string &pluginPath) {
+    llvm::errs() << "[firtool] load plugin " << pluginPath << '\n';
+    auto plugin = PassPlugin::load(pluginPath);
+    if (!plugin) {
+      errs() << plugin.takeError() << '\n';
+      errs() << "Failed to load passes from '" << pluginPath
+             << "'. Request ignored.\n";
+      return;
+    }
+    plugin.get().registerPassRegistryCallbacks();
+  });
+
   // Register passes before parsing command-line options, so that they are
   // available for use with options like `--mlir-print-ir-before`.
   {
@@ -619,6 +692,7 @@ int main(int argc, char **argv) {
 
     // Dialect passes:
     firrtl::registerPasses();
+    om::registerPasses();
     sv::registerPasses();
 
     // Export passes:
@@ -632,6 +706,7 @@ int main(int argc, char **argv) {
     registerLowerFIRRTLToHWPass();
     registerLegalizeAnonEnumsPass();
     registerLowerSeqToSVPass();
+    registerLowerSimToSVPass();
     registerLowerVerifToSVPass();
   }
 
@@ -640,15 +715,18 @@ int main(int argc, char **argv) {
   registerPassManagerCLOptions();
   registerDefaultTimingManagerCLOptions();
   registerAsmPrinterCLOptions();
+  firtool::registerFirtoolCLOptions();
   cl::AddExtraVersionPrinter(
       [](raw_ostream &os) { os << getCirctVersion() << '\n'; });
   // Parse pass names in main to ensure static initialization completed.
   cl::ParseCommandLineOptions(argc, argv, "MLIR-based FIRRTL compiler\n");
 
   MLIRContext context;
+  // Get firtool options from cmdline
+  firtool::FirtoolOptions firtoolOptions;
 
   // Do the guts of the firtool process.
-  auto result = executeFirtool(context);
+  auto result = executeFirtool(context, firtoolOptions);
 
   // Use "exit" instead of return'ing to signal completion.  This avoids
   // invoking the MLIRContext destructor, which spends a bunch of time

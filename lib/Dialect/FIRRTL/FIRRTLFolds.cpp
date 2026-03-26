@@ -16,6 +16,7 @@
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Support/APInt.h"
 #include "circt/Support/LLVM.h"
+#include "circt/Support/Naming.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/APSInt.h"
@@ -85,32 +86,6 @@ static bool isUInt1(Type type) {
   return true;
 }
 
-// Heuristic to pick the best name.
-// Good names are not useless, don't start with an underscore, minimize
-// underscores in them, and are short. This function deterministically favors
-// the second name on ties.
-static StringRef chooseName(StringRef a, StringRef b) {
-  if (a.empty())
-    return b;
-  if (b.empty())
-    return a;
-  if (isUselessName(a))
-    return b;
-  if (isUselessName(b))
-    return a;
-  if (a.starts_with("_"))
-    return b;
-  if (b.starts_with("_"))
-    return a;
-  if (b.count('_') < a.count('_'))
-    return b;
-  if (b.count('_') > a.count('_'))
-    return a;
-  if (a.size() > b.size())
-    return b;
-  return a;
-}
-
 /// Set the name of an op based on the best of two names:  The current name, and
 /// the name passed in.
 static void updateName(PatternRewriter &rewriter, Operation *op,
@@ -153,15 +128,6 @@ static OpTy replaceOpWithNewOpAndCopyName(PatternRewriter &rewriter,
       rewriter.replaceOpWithNewOp<OpTy>(op, std::forward<Args>(args)...);
   updateName(rewriter, newOp, name);
   return newOp;
-}
-
-/// Return true if this is a useless temporary name produced by FIRRTL.  We
-/// drop these as they don't convey semantic meaning.
-bool circt::firrtl::isUselessName(StringRef name) {
-  if (name.empty())
-    return true;
-  // Ignore _.*
-  return name.startswith("_T") || name.startswith("_WIRE");
 }
 
 /// Return true if the name is droppable. Note that this is different from
@@ -416,6 +382,11 @@ OpFoldResult FIntegerConstantOp::fold(FoldAdaptor adaptor) {
 }
 
 OpFoldResult BoolConstantOp::fold(FoldAdaptor adaptor) {
+  assert(adaptor.getOperands().empty() && "constant has no operands");
+  return getValueAttr();
+}
+
+OpFoldResult DoubleConstantOp::fold(FoldAdaptor adaptor) {
   assert(adaptor.getOperands().empty() && "constant has no operands");
   return getValueAttr();
 }
@@ -1486,9 +1457,10 @@ public:
 
 void MuxPrimOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                             MLIRContext *context) {
-  results.add<MuxPad, MuxSharedCond, patterns::MuxNot, patterns::MuxSameTrue,
-              patterns::MuxSameFalse, patterns::NarrowMuxLHS,
-              patterns::NarrowMuxRHS>(context);
+  results.add<MuxPad, MuxSharedCond, patterns::MuxEQOperands,
+              patterns::MuxEQOperandsSwapped, patterns::MuxNEQ,
+              patterns::MuxNot, patterns::MuxSameTrue, patterns::MuxSameFalse,
+              patterns::NarrowMuxLHS, patterns::NarrowMuxRHS>(context);
 }
 
 OpFoldResult PadPrimOp::fold(FoldAdaptor adaptor) {
@@ -1718,15 +1690,17 @@ LogicalResult MultibitMuxOp::canonicalize(MultibitMuxOp op,
 StrictConnectOp firrtl::getSingleConnectUserOf(Value value) {
   StrictConnectOp connect;
   for (Operation *user : value.getUsers()) {
-    // If we see an attach, just conservatively fail.
-    if (isa<AttachOp>(user))
+    // If we see an attach or aggregate sublements, just conservatively fail.
+    if (isa<AttachOp, SubfieldOp, SubaccessOp, SubindexOp>(user))
       return {};
 
     if (auto aConnect = dyn_cast<FConnectLike>(user))
       if (aConnect.getDest() == value) {
         auto strictConnect = dyn_cast<StrictConnectOp>(*aConnect);
-        // If this is not a strict connect, or a second strict connect, fail.
-        if (!strictConnect || (connect && connect != strictConnect))
+        // If this is not a strict connect, a second strict connect or in a
+        // different block, fail.
+        if (!strictConnect || (connect && connect != strictConnect) ||
+            strictConnect->getBlock() != value.getParentBlock())
           return {};
         else
           connect = strictConnect;
@@ -1747,7 +1721,8 @@ static LogicalResult canonicalizeSingleSetConnect(StrictConnectOp op,
   // Only support wire and reg for now.
   if (!isa<WireOp>(connectedDecl) && !isa<RegOp>(connectedDecl))
     return failure();
-  if (hasDontTouch(connectedDecl) || !AnnotationSet(connectedDecl).empty() ||
+  if (hasDontTouch(connectedDecl) ||
+      !AnnotationSet(connectedDecl).canBeDeleted() ||
       !hasDroppableName(connectedDecl) ||
       cast<Forceable>(connectedDecl).isForceable())
     return failure();
@@ -1771,7 +1746,7 @@ static LogicalResult canonicalizeSingleSetConnect(StrictConnectOp op,
   } else {
     // Constants/invalids in the same block are ok to forward, even through
     // reg's since the clocking doesn't matter for constants.
-    if (!isa<ConstantOp>(srcValueOp) && !isa<InvalidValueOp>(srcValueOp))
+    if (!isa<ConstantOp>(srcValueOp))
       return failure();
     if (srcValueOp->getBlock() != declBlock)
       return failure();
@@ -1780,26 +1755,10 @@ static LogicalResult canonicalizeSingleSetConnect(StrictConnectOp op,
   // Ok, we know we are doing the transformation.
 
   auto replacement = op.getSrc();
-  if (srcValueOp) {
-    // Replace with constant zero.
-    if (isa<InvalidValueOp>(srcValueOp)) {
-      if (isa<BundleType, FVectorType>(op.getDest().getType()))
-        return failure();
-      if (isa<ClockType, AsyncResetType, ResetType>(op.getDest().getType()))
-        replacement = rewriter.create<SpecialConstantOp>(
-            op.getSrc().getLoc(), op.getDest().getType(),
-            rewriter.getBoolAttr(false));
-      else
-        replacement = rewriter.create<ConstantOp>(
-            op.getSrc().getLoc(), op.getDest().getType(),
-            getIntZerosAttr(op.getDest().getType()));
-    }
-    // This will be replaced with the constant source.  First, make sure the
-    // constant dominates all users.
-    else if (srcValueOp != &declBlock->front()) {
-      srcValueOp->moveBefore(&declBlock->front());
-    }
-  }
+  // This will be replaced with the constant source.  First, make sure the
+  // constant dominates all users.
+  if (srcValueOp && srcValueOp != &declBlock->front())
+    srcValueOp->moveBefore(&declBlock->front());
 
   // Replace all things *using* the decl with the constant/port, and
   // remove the declaration.
@@ -1890,6 +1849,46 @@ LogicalResult AttachOp::canonicalize(AttachOp op, PatternRewriter &rewriter) {
   return failure();
 }
 
+/// Replaces the given op with the contents of the given single-block region.
+static void replaceOpWithRegion(PatternRewriter &rewriter, Operation *op,
+                                Region &region) {
+  assert(llvm::hasSingleElement(region) && "expected single-region block");
+  rewriter.inlineBlockBefore(&region.front(), op, {});
+}
+
+LogicalResult WhenOp::canonicalize(WhenOp op, PatternRewriter &rewriter) {
+  if (auto constant = op.getCondition().getDefiningOp<firrtl::ConstantOp>()) {
+    if (constant.getValue().isAllOnes())
+      replaceOpWithRegion(rewriter, op, op.getThenRegion());
+    else if (op.hasElseRegion() && !op.getElseRegion().empty())
+      replaceOpWithRegion(rewriter, op, op.getElseRegion());
+
+    rewriter.eraseOp(op);
+
+    return success();
+  }
+
+  // Erase empty if-else block.
+  if (!op.getThenBlock().empty() && op.hasElseRegion() &&
+      op.getElseBlock().empty()) {
+    rewriter.eraseBlock(&op.getElseBlock());
+    return success();
+  }
+
+  // Erase empty whens.
+
+  // If there is stuff in the then block, leave this operation alone.
+  if (!op.getThenBlock().empty())
+    return failure();
+
+  // If not and there is no else, then this operation is just useless.
+  if (!op.hasElseRegion() || op.getElseBlock().empty()) {
+    rewriter.eraseOp(op);
+    return success();
+  }
+  return failure();
+}
+
 namespace {
 // Remove private nodes.  If they have an interesting names, move the name to
 // the source expression.
@@ -1901,7 +1900,7 @@ struct FoldNodeName : public mlir::RewritePattern {
     auto node = cast<NodeOp>(op);
     auto name = node.getNameAttr();
     if (!node.hasDroppableName() || node.getInnerSym() ||
-        !node.getAnnotations().empty() || node.isForceable())
+        !AnnotationSet(node).canBeDeleted() || node.isForceable())
       return failure();
     auto *newOp = node.getInput().getDefiningOp();
     // Best effort, do not rename InstanceOp
@@ -1919,7 +1918,7 @@ struct NodeBypass : public mlir::RewritePattern {
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
     auto node = cast<NodeOp>(op);
-    if (node.getInnerSym() || !node.getAnnotations().empty() ||
+    if (node.getInnerSym() || !AnnotationSet(node).canBeDeleted() ||
         node.use_empty() || node.isForceable())
       return failure();
     rewriter.startRootUpdate(node);
@@ -1948,7 +1947,8 @@ LogicalResult NodeOp::fold(FoldAdaptor adaptor,
     return failure();
   if (hasDontTouch(getResult())) // handles inner symbols
     return failure();
-  if (getAnnotationsAttr() && !getAnnotationsAttr().empty())
+  if (getAnnotationsAttr() &&
+      !AnnotationSet(getAnnotationsAttr()).canBeDeleted())
     return failure();
   if (isForceable())
     return failure();
@@ -1974,7 +1974,7 @@ struct AggOneShot : public mlir::RewritePattern {
 
   SmallVector<Value> getCompleteWrite(Operation *lhs) const {
     auto lhsTy = lhs->getResult(0).getType();
-    if (!isa<BundleType, FVectorType>(lhsTy))
+    if (!type_isa<BundleType, FVectorType>(lhsTy))
       return {};
 
     DenseMap<uint32_t, Value> fields;
@@ -1988,6 +1988,8 @@ struct AggOneShot : public mlir::RewritePattern {
         for (Operation *subuser : subField.getResult().getUsers()) {
           if (auto aConnect = dyn_cast<StrictConnectOp>(subuser)) {
             if (aConnect.getDest() == subField) {
+              if (subuser->getParentOp() != lhs->getParentOp())
+                return {};
               if (fields.count(subField.getFieldIndex())) // duplicate write
                 return {};
               fields[subField.getFieldIndex()] = aConnect.getSrc();
@@ -2000,6 +2002,8 @@ struct AggOneShot : public mlir::RewritePattern {
         for (Operation *subuser : subIndex.getResult().getUsers()) {
           if (auto aConnect = dyn_cast<StrictConnectOp>(subuser)) {
             if (aConnect.getDest() == subIndex) {
+              if (subuser->getParentOp() != lhs->getParentOp())
+                return {};
               if (fields.count(subIndex.getIndex())) // duplicate write
                 return {};
               fields[subIndex.getIndex()] = aConnect.getSrc();
@@ -2171,7 +2175,7 @@ struct FoldResetMux : public mlir::RewritePattern {
     auto reset =
         dyn_cast_or_null<ConstantOp>(reg.getResetValue().getDefiningOp());
     if (!reset || hasDontTouch(reg.getOperation()) ||
-        !reg.getAnnotations().empty() || reg.isForceable())
+        !AnnotationSet(reg).canBeDeleted() || reg.isForceable())
       return failure();
     // Find the one true connect, or bail
     auto con = getSingleConnectUserOf(reg.getResult());
@@ -2370,7 +2374,8 @@ struct FoldZeroWidthMemory : public mlir::RewritePattern {
     if (hasDontTouch(mem))
       return failure();
 
-    if (mem.getDataType().getBitWidthOrSentinel() != 0)
+    if (!firrtl::type_isa<IntType>(mem.getDataType()) ||
+        mem.getDataType().getBitWidthOrSentinel() != 0)
       return failure();
 
     // Make sure are users are safe to replace
@@ -2384,8 +2389,17 @@ struct FoldZeroWidthMemory : public mlir::RewritePattern {
     for (auto port : op->getResults()) {
       for (auto *user : llvm::make_early_inc_range(port.getUsers())) {
         SubfieldOp sfop = cast<SubfieldOp>(user);
-        replaceOpWithNewOpAndCopyName<WireOp>(rewriter, sfop,
-                                              sfop.getResult().getType());
+        StringRef fieldName = sfop.getFieldName();
+        auto wire = replaceOpWithNewOpAndCopyName<WireOp>(
+                        rewriter, sfop, sfop.getResult().getType())
+                        .getResult();
+        if (fieldName.ends_with("data")) {
+          // Make sure to write data ports.
+          auto zero = rewriter.create<firrtl::ConstantOp>(
+              wire.getLoc(), firrtl::type_cast<IntType>(wire.getType()),
+              APInt::getZero(0));
+          rewriter.create<StrictConnectOp>(wire.getLoc(), wire, zero);
+        }
       }
     }
     rewriter.eraseOp(op);
@@ -3047,8 +3061,9 @@ static LogicalResult foldHiddenReset(RegOp reg, PatternRewriter &rewriter) {
   if (!constOp)
     return failure();
 
-  // reset should be a module port (heuristic to limit to intended reset lines).
-  if (!isa<BlockArgument>(mux.getSel()))
+  // For a non-constant register, reset should be a module port (heuristic to
+  // limit to intended reset lines). Replace the register anyway if constant.
+  if (!isa<BlockArgument>(mux.getSel()) && !constReg)
     return failure();
 
   // Check all types should be typed by now

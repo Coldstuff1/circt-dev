@@ -24,56 +24,89 @@ class SeqOp<string mnemonic, list<Trait> traits = []> :
 
 def CompRegOp : SeqOp<"compreg",
     [Pure, Clocked, Resettable,
-     AllTypesMatch<["input", "data"/*, "resetValue"*/]>,
-     SameVariadicOperandSize,
+     AllTypesMatch<["input", "data"]>,
      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-     DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>]> {
+     DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>,
+     AttrSizedOperandSegments]> {
        // AllTypesMatch doesn't work with Optional types yet.
 
   let summary = "Register a value, storing it for one cycle";
   let description = "See the Seq dialect rationale for a longer description";
 
-  let arguments = (ins AnyType:$input, I1:$clk, StrAttr:$name,
-    Optional<I1>:$reset, Optional<AnyType>:$resetValue,
-    OptionalAttr<InnerSymAttr>:$inner_sym);
+  let arguments = (ins
+    AnyType:$input,
+    ClockType:$clk,
+    OptionalAttr<StrAttr>:$name,
+    Optional<I1>:$reset,
+    Optional<AnyType>:$resetValue,
+    Optional<AnyType>:$powerOnValue,
+    OptionalAttr<InnerSymAttr>:$inner_sym
+  );
   let results = (outs AnyType:$data);
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = [{
+    (`sym` $inner_sym^)? custom<ImplicitSSAName>($name) $input `,` $clk
+    (`reset` $reset^ `,` $resetValue)?
+    (`powerOn` $powerOnValue^)? attr-dict `:` type($data)
+    custom<OptionalTypeMatch>(ref(type($data)), ref($resetValue), type($resetValue))
+    custom<OptionalTypeMatch>(ref(type($data)), ref($powerOnValue), type($powerOnValue))
+  }];
   let hasVerifier = 1;
 
   let builders = [
+    /// Create a register with no name nor inner_sym.
+    OpBuilder<(ins "Value":$input, "Value":$clk), [{
+      return build($_builder, $_state, input.getType(), input, clk,
+                   /*name*/ StringAttr(),
+                   /*reset*/ Value(), /*resetValue*/ Value(),
+                   /*powerOnValue*/ Value(), hw::InnerSymAttr());
+    }]>,
     /// Create a register with an inner_sym matching the register's name.
-    OpBuilder<(ins "Value":$input, "Value":$clk, "StringRef":$name), [{
-      auto nameAttr = StringAttr::get($_builder.getContext(), name);
+    OpBuilder<(ins "Value":$input, "Value":$clk, "StringAttrOrRef":$name), [{
+      auto nameAttr = name.get($_builder.getContext());
       return build($_builder, $_state, input.getType(), input, clk, nameAttr,
-                   Value(), Value(), hw::InnerSymAttr::get(nameAttr));
+                   /*reset*/ Value(), /*resetValue*/ Value(),
+                   /*powerOnValue*/ Value(), hw::InnerSymAttr::get(nameAttr));
     }]>,
-    /// Create a register with a reset, with an inner_sym matching the 
-    /// register's name.
-    OpBuilder<(ins "Value":$input, "Value":$clk, "Value":$reset,
-                   "Value":$rstValue, "StringRef":$name), [{
-      auto nameAttr = StringAttr::get($_builder.getContext(), name);
+    /// Create a register with a reset, with an inner_sym matching the
+    /// register's name, and optional power-on value.
+    OpBuilder<(ins "Value":$input, "Value":$clk, "Value":$reset, "Value":$rstValue,
+                   "StringAttrOrRef":$name, CArg<"Value", "{}">:$powerOnValue), [{
+      auto nameAttr = name.get($_builder.getContext());
       return build($_builder, $_state, input.getType(), input, clk, nameAttr,
-                   reset, rstValue, hw::InnerSymAttr::get(nameAttr));
-    }]>,
+                   reset, rstValue, powerOnValue, hw::InnerSymAttr::get(nameAttr));
+    }]>
   ];
 }
 
 def CompRegClockEnabledOp : SeqOp<"compreg.ce",
     [Pure, Clocked, Resettable,
-     AllTypesMatch<["input", "data"/*, "resetValue"*/]>,
-     SameVariadicOperandSize,
+     AllTypesMatch<["input", "data"]>,
      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-     DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>]> {
+     DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>,
+     AttrSizedOperandSegments]> {
        // AllTypesMatch doesn't work with Optional types yet.
 
   let summary = "When enabled, register a value";
   let description = "See the Seq dialect rationale for a longer description";
 
-  let arguments = (ins AnyType:$input, I1:$clk, I1:$clockEnable, StrAttr:$name,
-    Optional<I1>:$reset, Optional<AnyType>:$resetValue,
-    OptionalAttr<InnerSymAttr>:$inner_sym);
+  let arguments = (ins
+    AnyType:$input,
+    ClockType:$clk,
+    I1:$clockEnable,
+    OptionalAttr<StrAttr>:$name,
+    Optional<I1>:$reset,
+    Optional<AnyType>:$resetValue,
+    Optional<AnyType>:$powerOnValue,
+    OptionalAttr<InnerSymAttr>:$inner_sym
+  );
   let results = (outs AnyType:$data);
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = [{
+    (`sym` $inner_sym^)? custom<ImplicitSSAName>($name) $input `,` $clk `,` $clockEnable
+    (`reset` $reset^ `,` $resetValue)?
+    (`powerOn` $powerOnValue^)? attr-dict `:` type($data)
+    custom<OptionalTypeMatch>(ref(type($data)), ref($resetValue), type($resetValue))
+    custom<OptionalTypeMatch>(ref(type($data)), ref($powerOnValue), type($powerOnValue))
+  }];
   let hasVerifier = 1;
 
   let builders = [
@@ -81,16 +114,63 @@ def CompRegClockEnabledOp : SeqOp<"compreg.ce",
                    "StringRef":$name), [{
       auto nameAttr = StringAttr::get($_builder.getContext(), name);
       return build($_builder, $_state, input.getType(), input, clk, ce,
-                   nameAttr, Value(), Value(), hw::InnerSymAttr::get(nameAttr));
+                   nameAttr, /*reset*/ Value(), /*resetValue*/ Value(),
+                   /*powerOnValue*/ Value(),
+                   hw::InnerSymAttr::get(nameAttr));
     }]>,
     OpBuilder<(ins "Value":$input, "Value":$clk, "Value":$ce,
-                   "Value":$reset, "Value":$rstValue, "StringRef":$name),
+                   "Value":$reset, "Value":$rstValue, "StringRef":$name,
+                   CArg<"Value", "{}">:$powerOnValue),
     [{
       auto nameAttr = StringAttr::get($_builder.getContext(), name);
       return build($_builder, $_state, input.getType(), input, clk, ce,
-                   nameAttr, reset, rstValue, hw::InnerSymAttr::get(nameAttr));
+                   nameAttr, reset, rstValue, powerOnValue,
+                   hw::InnerSymAttr::get(nameAttr));
     }]>,
   ];
+}
+
+def ShiftRegOp : SeqOp<"shiftreg", [
+  Pure,
+  Clocked,
+  Resettable,
+  AllTypesMatch<["input", "data"]>,
+  DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+  DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>,
+  AttrSizedOperandSegments
+]> {
+  let summary = "Shift register";
+  let description = [{
+    The `seq.shiftreg` op represents a shift register. It takes the input
+    value and shifts it every cycle when `clockEnable` is asserted.
+    The `reset` and `resetValue` operands are optional and if present, every
+    entry in the shift register will be initialized to `resetValue` upon
+    assertion of the reset signal. Exact reset behavior (sync/async) is
+    implementation defined.
+  }];
+
+  let arguments = (ins
+    ConfinedAttr<I64Attr, [IntMinValue<1>]>:$numElements,
+    AnyType:$input,
+    ClockType:$clk,
+    I1:$clockEnable,
+    OptionalAttr<StrAttr>:$name,
+    Optional<I1>:$reset,
+    Optional<AnyType>:$resetValue,
+    Optional<AnyType>:$powerOnValue,
+    OptionalAttr<InnerSymAttr>:$inner_sym
+  );
+  let results = (outs AnyType:$data);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `[` $numElements `]`
+    (`sym` $inner_sym^)? custom<ImplicitSSAName>($name) $input `,` $clk `,` $clockEnable
+    (`reset` $reset^ `,` $resetValue)?
+    (`powerOn` $powerOnValue^)? attr-dict `:` type($data)
+    custom<OptionalTypeMatch>(ref(type($data)), ref($resetValue), type($resetValue))
+    custom<OptionalTypeMatch>(ref(type($data)), ref($powerOnValue), type($powerOnValue))
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -138,11 +218,15 @@ def FirRegOp : SeqOp<"firreg",
     ```
   }];
 
-  let arguments = (ins AnyType:$next, I1:$clk, StrAttr:$name,
-                       OptionalAttr<InnerSymAttr>:$inner_sym,
-                       OptionalAttr<APIntAttr>:$preset,
-                       Optional<I1>:$reset, Optional<AnyType>:$resetValue,
-                       UnitAttr:$isAsync);
+  let arguments = (ins
+    AnyType:$next,
+    ClockType:$clk,
+    StrAttr:$name,
+    OptionalAttr<InnerSymAttr>:$inner_sym,
+    OptionalAttr<APIntAttr>:$preset,
+    Optional<I1>:$reset, Optional<AnyType>:$resetValue,
+    UnitAttr:$isAsync
+  );
   let results = (outs AnyType:$data);
 
   let skipDefaultBuilders = 1;
@@ -192,7 +276,7 @@ def FIFOOp : SeqOp<"fifo", [
   }];
 
   let arguments = (ins
-    HWIntegerType:$input, I1:$rdEn, I1:$wrEn, I1:$clk, I1:$rst,
+    HWIntegerType:$input, I1:$rdEn, I1:$wrEn, ClockType:$clk, I1:$rst,
     ConfinedAttr<I64Attr, [IntMinValue<1>]>:$depth,
     OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<0>]>>:$almostFullThreshold,
     OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<0>]>>:$almostEmptyThreshold
@@ -219,7 +303,7 @@ def HLMemOp : SeqOp<"hlmem", [
   let summary = "Instantiate a high-level memory.";
   let description = "See the Seq dialect rationale for a longer description";
 
-  let arguments = (ins I1:$clk, I1:$rst, SymbolNameAttr:$sym_name);
+  let arguments = (ins ClockType:$clk, I1:$rst, SymbolNameAttr:$sym_name);
   let results = (outs HLMemType:$handle);
 
   let extraClassDeclaration = [{
@@ -246,10 +330,10 @@ class HLMemTypeIndexingConstraint<string hlmemvalue, string addresses>
 def ReadPortOp : SeqOp<"read", [
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
     HLMemTypeIndexingConstraint<"memory", "addresses">,
-    AttrSizedOperandSegments     
+    AttrSizedOperandSegments
   ]> {
   let summary = "Structural read access to a seq.hlmem, with an optional read enable signal.";
-  let arguments = (ins 
+  let arguments = (ins
     HLMemType:$memory,
     Variadic<HWIntegerType>:$addresses,
     Optional<I1>:$rdEn,
@@ -284,7 +368,8 @@ def WritePortOp : SeqOp<"write", [
 
 def ClockGateOp : SeqOp<"clock_gate", [
   Pure,
-  DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>
+  DeclareOpInterfaceMethods<InnerSymbol, ["getTargetResultIndex"]>,
+  AllTypesMatch<["input", "output"]>
 ]> {
   let summary = "Safely gates a clock with an enable signal";
   let description = [{
@@ -304,19 +389,19 @@ def ClockGateOp : SeqOp<"clock_gate", [
     symbol will target the instance to the external module it lowers to.
 
     ```
-    %gatedClock = seq.clock_gate %clock, %enable : i1
-    %gatedClock = seq.clock_gate %clock, %enable, %test_enable : i1, i1
+    %gatedClock = seq.clock_gate %clock, %enable
+    %gatedClock = seq.clock_gate %clock, %enable, %test_enable
     ```
   }];
 
   let arguments = (ins
-    I1:$input,
+    ClockType:$input,
     I1:$enable,
     Optional<I1>:$test_enable,
     OptionalAttr<InnerSymAttr>:$inner_sym
   );
 
-  let results = (outs I1:$output);
+  let results = (outs ClockType:$output);
   let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
   let assemblyFormat = [{
@@ -331,8 +416,8 @@ def ClockGateOp : SeqOp<"clock_gate", [
 def ClockMuxOp : SeqOp<"clock_mux", [Pure]> {
   let summary = "Safely selects a clock based on a condition";
   let description = [{
-    The `seq.clock_mux` op selects a clock from two options. If `cond` is 
-    true, the first clock operand is selected to drive downstream logic. 
+    The `seq.clock_mux` op selects a clock from two options. If `cond` is
+    true, the first clock operand is selected to drive downstream logic.
     Otherwise, the second clock is used.
 
     ```
@@ -340,8 +425,8 @@ def ClockMuxOp : SeqOp<"clock_mux", [Pure]> {
     ```
   }];
 
-  let arguments = (ins I1:$cond, I1:$trueClock, I1:$falseClock);
-  let results = (outs I1:$result);
+  let arguments = (ins I1:$cond, ClockType:$trueClock, ClockType:$falseClock);
+  let results = (outs ClockType:$result);
 
   let hasFolder = 1;
 
@@ -354,7 +439,7 @@ def ClockMuxOp : SeqOp<"clock_mux", [Pure]> {
 // Clock Dividers
 //===----------------------------------------------------------------------===//
 
-def ClockDivider : SeqOp<"clock_div", [Pure]> {
+def ClockDividerOp : SeqOp<"clock_div", [Pure]> {
   let summary = "Produces a clock divided by a power of two";
   let description = [{
     The output clock is phase-aligned to the input clock.
@@ -364,8 +449,8 @@ def ClockDivider : SeqOp<"clock_div", [Pure]> {
     ```
   }];
 
-  let arguments = (ins I1:$clockIn, I8Attr:$pow2);
-  let results = (outs I1:$clockOut);
+  let arguments = (ins ClockType:$clockIn, I8Attr:$pow2);
+  let results = (outs ClockType:$clockOut);
 
   let assemblyFormat = [{
     $clockIn `by` $pow2 attr-dict
@@ -430,6 +515,7 @@ class DataMatchesFirMem<string memoryValue, string dataValue> :
     }]>;
 
 def FirMemReadOp : SeqOp<"firmem.read_port", [
+  Clocked,
   MemoryEffects<[MemRead]>,
   AddressMatchesFirMem<"memory", "address">,
   DataMatchesFirMem<"memory", "data">
@@ -446,12 +532,12 @@ def FirMemReadOp : SeqOp<"firmem.read_port", [
   let arguments = (ins
     FirMemType:$memory,
     AnySignlessInteger:$address,
-    I1:$clock,
+    ClockType:$clk,
     Optional<I1>:$enable
   );
   let results = (outs AnySignlessInteger:$data);
   let assemblyFormat = [{
-    $memory `[` $address `]` `,` `clock` $clock
+    $memory `[` $address `]` `,` `clock` $clk
     (`enable` $enable^)?
     attr-dict `:` type($memory)
   }];
@@ -459,6 +545,7 @@ def FirMemReadOp : SeqOp<"firmem.read_port", [
 }
 
 def FirMemWriteOp : SeqOp<"firmem.write_port", [
+  Clocked,
   MemoryEffects<[MemWrite]>,
   AddressMatchesFirMem<"memory", "address">,
   DataMatchesFirMem<"memory", "data">,
@@ -479,13 +566,13 @@ def FirMemWriteOp : SeqOp<"firmem.write_port", [
   let arguments = (ins
     FirMemType:$memory,
     AnySignlessInteger:$address,
-    I1:$clock,
+    ClockType:$clk,
     Optional<I1>:$enable,
     AnySignlessInteger:$data,
     Optional<AnySignlessInteger>:$mask
   );
   let assemblyFormat = [{
-    $memory `[` $address `]` `=` $data `,` `clock` $clock
+    $memory `[` $address `]` `=` $data `,` `clock` $clk
     (`enable` $enable^)? (`mask` $mask^)?
     attr-dict `:` type($memory) (`,` type($mask)^)?
   }];
@@ -494,6 +581,7 @@ def FirMemWriteOp : SeqOp<"firmem.write_port", [
 }
 
 def FirMemReadWriteOp : SeqOp<"firmem.read_write_port", [
+  Clocked,
   MemoryEffects<[MemRead, MemWrite]>,
   AddressMatchesFirMem<"memory", "address">,
   DataMatchesFirMem<"memory", "writeData">,
@@ -516,7 +604,7 @@ def FirMemReadWriteOp : SeqOp<"firmem.read_write_port", [
   let arguments = (ins
     FirMemType:$memory,
     AnySignlessInteger:$address,
-    I1:$clock,
+    ClockType:$clk,
     Optional<I1>:$enable,
     AnySignlessInteger:$writeData,
     I1:$mode,
@@ -524,12 +612,33 @@ def FirMemReadWriteOp : SeqOp<"firmem.read_write_port", [
   );
   let results = (outs AnySignlessInteger:$readData);
   let assemblyFormat = [{
-    $memory `[` $address `]` `=` $writeData `if` $mode `,` `clock` $clock
+    $memory `[` $address `]` `=` $writeData `if` $mode `,` `clock` $clk
     (`enable` $enable^)? (`mask` $mask^)?
     attr-dict `:` type($memory) (`,` type($mask)^)?
   }];
   let hasVerifier = 1;
   let hasCanonicalizeMethod = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Tied-off clock
+//===----------------------------------------------------------------------===//
+
+def ConstClockOp : SeqOp<"const_clock", [Pure, ConstantLike]> {
+  let summary = "Produce constant clock value";
+  let description = [{
+    The constant operation produces a constant clock value.
+    ```
+      %clock = seq.const_clock low
+    ```
+  }];
+
+  let arguments = (ins ClockConstAttr:$value);
+  let results = (outs ClockType:$result);
+
+  let assemblyFormat = "$value attr-dict";
+
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -544,6 +653,7 @@ def ToClockOp : SeqOp<"to_clock", [Pure]> {
 
   let assemblyFormat = "$input attr-dict";
 
+  let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
 }
 
@@ -555,5 +665,6 @@ def FromClockOp : SeqOp<"from_clock", [Pure]> {
 
   let assemblyFormat = "$input attr-dict";
 
+  let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
 }

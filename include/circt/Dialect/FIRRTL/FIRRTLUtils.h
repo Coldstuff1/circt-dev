@@ -84,8 +84,12 @@ bool walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
 
 /// Get the FieldRef from a value.  This will travel backwards to through the
 /// IR, following Subfield and Subindex to find the op which declares the
-/// location.
-FieldRef getFieldRefFromValue(Value value);
+/// location.  Optionally look through recognized cast operations, which
+/// likely will result in source having slightly different type.
+FieldRef getFieldRefFromValue(Value value, bool lookThroughCasts = false);
+
+/// Get the delta indexing from a value, as a FieldRef.
+FieldRef getDeltaRef(Value value, bool lookThroughCasts = false);
 
 /// Get a string identifier representing the FieldRef.  Return this string and a
 /// boolean indicating if a valid "root" for the identifier was found.  If
@@ -106,13 +110,19 @@ Value getValueByFieldID(ImplicitLocOpBuilder builder, Value value,
 
 /// Walk leaf ground types in the `firrtlType` and apply the function `fn`.
 /// The first argument of `fn` is field ID, and the second argument is a
-/// leaf ground type.
-void walkGroundTypes(FIRRTLType firrtlType,
-                     llvm::function_ref<void(uint64_t, FIRRTLBaseType)> fn);
+/// leaf ground type, and the third argument indicates if the element was
+/// flipped in a bundle.
+void walkGroundTypes(
+    FIRRTLType firrtlType,
+    llvm::function_ref<void(uint64_t, FIRRTLBaseType, bool)> fn);
 
 //===----------------------------------------------------------------------===//
 // Inner symbol and InnerRef helpers.
 //===----------------------------------------------------------------------===//
+
+/// Return the inner sym target for the specified value and fieldID.
+/// If root is a blockargument, this must be FModuleLike.
+hw::InnerSymTarget getTargetFor(FieldRef ref);
 
 /// Ensure that the the InnerSymAttr has a symbol on the field specified.
 /// Returns the updated InnerSymAttr as well as the name of the symbol attached
@@ -224,7 +234,8 @@ inline FIRRTLType mapBaseType(FIRRTLType type,
   return TypeSwitch<FIRRTLType, FIRRTLType>(type)
       .Case<FIRRTLBaseType>([&](auto base) { return fn(base); })
       .Case<RefType>([&](auto ref) {
-        return RefType::get(fn(ref.getType()), ref.getForceable());
+        return RefType::get(fn(ref.getType()), ref.getForceable(),
+                            ref.getLayer());
       });
 }
 
@@ -240,7 +251,7 @@ mapBaseTypeNullable(FIRRTLType type,
         auto result = fn(ref.getType());
         if (!result)
           return {};
-        return RefType::get(result, ref.getForceable());
+        return RefType::get(result, ref.getForceable(), ref.getLayer());
       });
 }
 

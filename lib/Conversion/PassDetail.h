@@ -16,11 +16,6 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
-
-namespace memref {
-class MemRefDialect;
-} // namespace memref
-
 namespace arith {
 class ArithDialect;
 } // namespace arith
@@ -85,10 +80,6 @@ namespace esi {
 class ESIDialect;
 } // namespace esi
 
-namespace hir {
-class HIRDialect;
-} // namespace hir
-
 namespace moore {
 class MooreDialect;
 } // namespace moore
@@ -125,6 +116,10 @@ class PipelineDialect;
 namespace seq {
 class SeqDialect;
 } // namespace seq
+
+namespace sim {
+class SimDialect;
+} // namespace sim
 
 namespace sv {
 class SVDialect;

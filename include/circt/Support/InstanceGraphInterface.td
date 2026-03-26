@@ -30,24 +30,24 @@ def InstanceGraphInstanceOpInterface : OpInterface<"InstanceOpInterface"> {
     InterfaceMethod<"Get the name of the instance",
     "::mlir::StringAttr", "getInstanceNameAttr", (ins)>,
 
-    InterfaceMethod<"Get the name of the instantiated module",
-    "::llvm::StringRef", "getReferencedModuleName", (ins),
+    InterfaceMethod<"Get the name of all the possibly instantiated modules",
+    "::llvm::SmallVector<::llvm::StringRef, 1>", "getReferencedModuleNames", (ins),
     /*methodBody=*/[{}],
-    /*defaultImplementation=*/[{ return $_op.getModuleName(); }]>,
+    /*defaultImplementation=*/[{
+      ::llvm::SmallVector<::llvm::StringRef, 1> targetNames;
+      for (::mlir::Attribute targetNameAttr : $_op.getReferencedModuleNamesAttr())
+        targetNames.push_back(
+            targetNameAttr.cast<::mlir::StringAttr>().getValue());
+      return targetNames;
+    }]>,
 
-    InterfaceMethod<"Get the name of the instantiated module",
-    "::mlir::StringAttr", "getReferencedModuleNameAttr", (ins),
+    InterfaceMethod<"Get the names of the instantiated modules",
+    "::mlir::ArrayAttr", "getReferencedModuleNamesAttr", (ins),
     /*methodBody=*/[{}],
-    /*defaultImplementation=*/[{ return $_op.getModuleNameAttr().getAttr(); }]>,
-
-    InterfaceMethod<[{
-      Get the referenced module (slow, unsafe).  This function directly accesses 
-      the parent operation to lookup a symbol, which is unsafe in many contexts.
-    }],
-    "::mlir::Operation *", "getReferencedModuleSlow", (ins)>,
-
-    InterfaceMethod<"Get the referenced module via a symbol table.",
-    "::mlir::Operation *", "getReferencedModule", (ins "SymbolTable&":$symtbl)>,
+    /*defaultImplementation=*/[{
+      auto attr = $_op.getReferencedModuleNameAttr();
+      return ::mlir::ArrayAttr::get(attr.getContext(), {attr});
+    }]>,
   ];
 }
 
@@ -68,7 +68,7 @@ def InstanceGraphModuleOpInterface : OpInterface<"ModuleOpInterface"> {
     /*methodBody=*/[{}],
     /*defaultImplementation=*/[{ return $_op.getNameAttr(); }]>,
   ];
-  
+
 }
 
 #endif // CIRCT_SUPPORT_INSTANCEGRAPH_INSTANCEGRAPHINTERFACE_TD

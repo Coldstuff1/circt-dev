@@ -14,11 +14,6 @@ using namespace mlir;
 using namespace circt;
 using namespace msft;
 
-bool circt::msft::isAnyModule(Operation *module) {
-  return isa<MSFTModuleOp, MSFTModuleExternOp>(module) ||
-         hw::isAnyModule(module);
-}
-
 SmallVector<unsigned> circt::msft::makeSequentialRange(unsigned size) {
   SmallVector<unsigned> seq;
   for (size_t i = 0; i < size; ++i)
@@ -29,10 +24,10 @@ SmallVector<unsigned> circt::msft::makeSequentialRange(unsigned size) {
 StringRef circt::msft::getValueName(Value v, const SymbolCache &syms,
                                     std::string &buff) {
   Operation *defOp = v.getDefiningOp();
-  if (auto inst = dyn_cast_or_null<InstanceOp>(defOp)) {
+  if (auto inst = dyn_cast_or_null<hw::InstanceOp>(defOp)) {
     Operation *modOp = syms.getDefinition(inst.getModuleNameAttr());
     if (modOp) { // If modOp isn't in the cache, it's probably a new module;
-      assert(isAnyModule(modOp) && "Instance must point to a module");
+      assert(isa<hw::HWModuleLike>(modOp) && "Instance must point to a module");
       OpResult instResult = v.cast<OpResult>();
       auto mod = cast<hw::HWModuleLike>(modOp);
       buff.clear();
@@ -45,9 +40,9 @@ StringRef circt::msft::getValueName(Value v, const SymbolCache &syms,
     }
   }
   if (auto blockArg = v.dyn_cast<BlockArgument>()) {
-    auto portInfo =
+    hw::ModulePortInfo portInfo(
         cast<hw::PortList>(blockArg.getOwner()->getParent()->getParentOp())
-            .getPortList();
+            .getPortList());
     return portInfo.atInput(blockArg.getArgNumber()).getName();
   }
   if (auto constOp = dyn_cast<hw::ConstantOp>(defOp)) {
@@ -70,20 +65,6 @@ void PassCommon::getAndSortModules(ModuleOp topMod,
   });
 }
 
-LogicalResult PassCommon::verifyInstances(mlir::ModuleOp mod) {
-  WalkResult r = mod.walk([&](InstanceOp inst) {
-    Operation *modOp = topLevelSyms.getDefinition(inst.getModuleNameAttr());
-    if (!isAnyModule(modOp))
-      return WalkResult::interrupt();
-
-    hw::ModulePortInfo ports = cast<hw::PortList>(modOp).getPortList();
-    return succeeded(inst.verifySignatureMatch(ports))
-               ? WalkResult::advance()
-               : WalkResult::interrupt();
-  });
-  return failure(r.wasInterrupted());
-}
-
 // Run a post-order DFS.
 void PassCommon::getAndSortModulesVisitor(
     hw::HWModuleLike mod, SmallVectorImpl<hw::HWModuleLike> &mods,
@@ -93,12 +74,15 @@ void PassCommon::getAndSortModulesVisitor(
   modsSeen.insert(mod);
 
   mod.walk([&](igraph::InstanceOpInterface inst) {
-    Operation *modOp =
-        topLevelSyms.getDefinition(inst.getReferencedModuleNameAttr());
-    assert(modOp);
-    moduleInstantiations[modOp].push_back(inst);
-    if (auto modLike = dyn_cast<hw::HWModuleLike>(modOp))
-      getAndSortModulesVisitor(modLike, mods, modsSeen);
+    auto targetNameAttrs = inst.getReferencedModuleNamesAttr();
+    for (auto targetNameAttr : targetNameAttrs) {
+      Operation *modOp =
+          topLevelSyms.getDefinition(targetNameAttr.cast<StringAttr>());
+      assert(modOp);
+      moduleInstantiations[modOp].push_back(inst);
+      if (auto modLike = dyn_cast<hw::HWModuleLike>(modOp))
+        getAndSortModulesVisitor(modLike, mods, modsSeen);
+    }
   });
 
   mods.push_back(mod);

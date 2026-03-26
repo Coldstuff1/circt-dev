@@ -198,6 +198,7 @@ FirMemLowering::createMemoryModule(FirMemConfig &mem,
   SmallVector<hw::PortInfo> ports;
 
   // Common types used for memory ports.
+  Type clkType = ClockType::get(context);
   Type bitType = IntegerType::get(context, 1);
   Type dataType = IntegerType::get(context, std::max((size_t)1, mem.dataWidth));
   Type maskType = IntegerType::get(context, mem.maskBits);
@@ -226,7 +227,7 @@ FirMemLowering::createMemoryModule(FirMemConfig &mem,
   auto addCommonPorts = [&](StringRef prefix, size_t idx) {
     addInput(prefix, idx, "_addr", addrType);
     addInput(prefix, idx, "_en", bitType);
-    addInput(prefix, idx, "_clk", bitType);
+    addInput(prefix, idx, "_clk", clkType);
   };
 
   // Add the read ports.
@@ -306,16 +307,19 @@ void FirMemLowering::lowerMemoriesInModule(
   LLVM_DEBUG(llvm::dbgs() << "Lowering " << mems.size() << " memories in "
                           << module.getName() << "\n");
 
-  hw::ConstantOp constOneOp;
-  auto constOne = [&] {
-    if (!constOneOp) {
+  DenseMap<unsigned, Value> constOneOps;
+  auto constOne = [&](unsigned width = 1) {
+    auto it = constOneOps.try_emplace(width, Value{});
+    if (it.second) {
       auto builder = OpBuilder::atBlockBegin(module.getBodyBlock());
-      constOneOp = builder.create<hw::ConstantOp>(module.getLoc(),
-                                                  builder.getI1Type(), 1);
+      it.first->second = builder.create<hw::ConstantOp>(
+          module.getLoc(), builder.getIntegerType(width), 1);
     }
-    return constOneOp;
+    return it.first->second;
   };
-  auto valueOrOne = [&](Value value) { return value ? value : constOne(); };
+  auto valueOrOne = [&](Value value, unsigned width = 1) {
+    return value ? value : constOne(width);
+  };
 
   for (auto [config, genOp, memOp] : mems) {
     LLVM_DEBUG(llvm::dbgs() << "- Lowering " << memOp.getName() << "\n");
@@ -332,7 +336,7 @@ void FirMemLowering::lowerMemoriesInModule(
         continue;
       addInput(port.getAddress());
       addInput(valueOrOne(port.getEnable()));
-      addInput(port.getClock());
+      addInput(port.getClk());
       addOutput(port.getData());
     }
 
@@ -343,12 +347,12 @@ void FirMemLowering::lowerMemoriesInModule(
         continue;
       addInput(port.getAddress());
       addInput(valueOrOne(port.getEnable()));
-      addInput(port.getClock());
+      addInput(port.getClk());
       addInput(port.getMode());
       addInput(port.getWriteData());
       addOutput(port.getReadData());
       if (config->maskBits > 1)
-        addInput(valueOrOne(port.getMask()));
+        addInput(valueOrOne(port.getMask(), config->maskBits));
     }
 
     // Add the write ports.
@@ -358,10 +362,10 @@ void FirMemLowering::lowerMemoriesInModule(
         continue;
       addInput(port.getAddress());
       addInput(valueOrOne(port.getEnable()));
-      addInput(port.getClock());
+      addInput(port.getClk());
       addInput(port.getData());
       if (config->maskBits > 1)
-        addInput(valueOrOne(port.getMask()));
+        addInput(valueOrOne(port.getMask(), config->maskBits));
     }
 
     // Create the module instance.

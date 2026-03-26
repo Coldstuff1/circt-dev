@@ -18,7 +18,6 @@
 // DIALECT-SAME: fsm
 // DIALECT-SAME: func
 // DIALECT-SAME: handshake
-// DIALECT-NEXT: hir
 // DIALECT-SAME: hw
 // DIALECT-SAME: hwarith
 // DIALECT-SAME: ibis

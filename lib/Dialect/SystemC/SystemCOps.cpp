@@ -15,9 +15,9 @@
 #include "circt/Dialect/HW/HWSymCache.h"
 #include "circt/Dialect/HW/ModuleImplementation.h"
 #include "circt/Support/CustomDirectiveImpl.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -116,7 +116,7 @@ SCModuleOp::getPortsOfDirection(hw::ModulePort::Direction direction) {
   return llvm::make_filter_range(getArguments(), predicateFn);
 }
 
-hw::ModulePortInfo SCModuleOp::getPortList() {
+SmallVector<::circt::hw::PortInfo> SCModuleOp::getPortList() {
   SmallVector<hw::PortInfo> ports;
   for (int i = 0, e = getNumArguments(); i < e; ++i) {
     hw::PortInfo info;
@@ -125,22 +125,10 @@ hw::ModulePortInfo SCModuleOp::getPortList() {
     info.dir = getDirection(info.type);
     ports.push_back(info);
   }
-  return hw::ModulePortInfo{ports};
+  return ports;
 }
 
 mlir::Region *SCModuleOp::getCallableRegion() { return &getBody(); }
-
-ArrayRef<mlir::Type> SCModuleOp::getCallableResults() {
-  return getResultTypes();
-}
-
-ArrayAttr SCModuleOp::getCallableArgAttrs() {
-  return getArgAttrs().value_or(nullptr);
-}
-
-ArrayAttr SCModuleOp::getCallableResAttrs() {
-  return getResAttrs().value_or(nullptr);
-}
 
 StringRef SCModuleOp::getModuleName() {
   return (*this)
@@ -219,6 +207,16 @@ void SCModuleOp::print(OpAsmPrinter &p) {
 
   p << ' ';
   p.printRegion(getBody(), false, false);
+}
+
+/// Returns the argument types of this function.
+ArrayRef<Type> SCModuleOp::getArgumentTypes() {
+  return getFunctionType().getInputs();
+}
+
+/// Returns the result types of this function.
+ArrayRef<Type> SCModuleOp::getResultTypes() {
+  return getFunctionType().getResults();
 }
 
 static Type wrapPortType(Type type, hw::ModulePort::Direction direction) {
@@ -459,21 +457,14 @@ void InstanceDeclOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 StringRef InstanceDeclOp::getInstanceName() { return getName(); }
 StringAttr InstanceDeclOp::getInstanceNameAttr() { return getNameAttr(); }
 
-Operation *InstanceDeclOp::getReferencedModule(const hw::HWSymbolCache *cache) {
+Operation *
+InstanceDeclOp::getReferencedModuleCached(const hw::HWSymbolCache *cache) {
   if (cache)
     if (auto *result = cache->getDefinition(getModuleNameAttr()))
       return result;
 
   auto topLevelModuleOp = (*this)->getParentOfType<ModuleOp>();
   return topLevelModuleOp.lookupSymbol(getModuleName());
-}
-
-Operation *InstanceDeclOp::getReferencedModule(SymbolTable &symtbl) {
-  return symtbl.lookup(getModuleNameAttr().getValue());
-}
-
-Operation *InstanceDeclOp::getReferencedModuleSlow() {
-  return getReferencedModule(/*cache=*/nullptr);
 }
 
 LogicalResult
@@ -539,8 +530,9 @@ InstanceDeclOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-hw::ModulePortInfo InstanceDeclOp::getPortList() {
-  return cast<hw::PortList>(getReferencedModuleSlow()).getPortList();
+SmallVector<hw::PortInfo> InstanceDeclOp::getPortList() {
+  return cast<hw::PortList>(getReferencedModuleCached(/*cache=*/nullptr))
+      .getPortList();
 }
 
 //===----------------------------------------------------------------------===//
@@ -727,9 +719,10 @@ LogicalResult VariableOp::verify() {
 void InteropVerilatedOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                                Operation *module, StringAttr name,
                                ArrayRef<Value> inputs) {
-  auto [argNames, resultNames] =
-      hw::instance_like_impl::getHWModuleArgAndResultNames(module);
-  build(odsBuilder, odsState, hw::getModuleType(module).getResults(), name,
+  auto mod = cast<hw::HWModuleLike>(module);
+  auto argNames = odsBuilder.getArrayAttr(mod.getInputNames());
+  auto resultNames = odsBuilder.getArrayAttr(mod.getOutputNames());
+  build(odsBuilder, odsState, mod.getHWModuleType().getOutputTypes(), name,
         FlatSymbolRefAttr::get(SymbolTable::getSymbolName(module)), argNames,
         resultNames, inputs);
 }

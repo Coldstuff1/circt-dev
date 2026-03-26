@@ -239,7 +239,7 @@ handshake.func @invalid_pack_wrong_types(%arg0 : i64, %arg1 : i32, %ctrl : none)
 // -----
 
 handshake.func @invalid_memref_block_arg(%arg0 : memref<2xi64>, %ctrl : none) -> none {
-  // expected-error @-1 {{'handshake.func' op expected that block argument #0 is used by an 'extmemory' operation}}
+  // expected-error @-1 {{'handshake.func' op expected that block argument #0 is used by an 'extmemory' or 'memory_controller' operation}}
   return %ctrl : none
 }
 
@@ -259,3 +259,10 @@ handshake.func @invalid_sost_op_wrong_operands(%arg0 : i64, %arg1 : i32, %ctrl :
   return %0, %ctrl : i64, none
 }
 
+// -----
+
+func.func @handshake_op_inside_non_finegrained_dataflow_region(%arg0 : none) -> (none) {
+  // expected-error @+1{{op expects parent op to be of the interface parent type required by the given op type}}
+  %0 = handshake.join %arg0 : none
+  return %0 : none
+}

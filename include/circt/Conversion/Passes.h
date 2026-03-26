@@ -13,10 +13,8 @@
 #ifndef CIRCT_CONVERSION_PASSES_H
 #define CIRCT_CONVERSION_PASSES_H
 
-#include "circt/Conversion/AffineToHIR.h"
 #include "circt/Conversion/AffineToLoopSchedule.h"
 #include "circt/Conversion/ArcToLLVM.h"
-#include "circt/Conversion/AutoAffineToHIRPass.h"
 #include "circt/Conversion/CFToHandshake.h"
 #include "circt/Conversion/CalyxNative.h"
 #include "circt/Conversion/CalyxToFSM.h"
@@ -28,10 +26,8 @@
 #include "circt/Conversion/ExportVerilog.h"
 #include "circt/Conversion/FIRRTLToHW.h"
 #include "circt/Conversion/FSMToSV.h"
-#include "circt/Conversion/GenCosimFiles.h"
-#include "circt/Conversion/HIRPragma.h"
-#include "circt/Conversion/HIRToHW.h"
 #include "circt/Conversion/HWArithToHW.h"
+#include "circt/Conversion/HWToBTOR2.h"
 #include "circt/Conversion/HWToLLHD.h"
 #include "circt/Conversion/HWToLLVM.h"
 #include "circt/Conversion/HWToSV.h"
@@ -44,6 +40,7 @@
 #include "circt/Conversion/PipelineToHW.h"
 #include "circt/Conversion/SCFToCalyx.h"
 #include "circt/Conversion/SeqToSV.h"
+#include "circt/Conversion/SimToSV.h"
 #include "circt/Conversion/VerifToSV.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/Pass.h"

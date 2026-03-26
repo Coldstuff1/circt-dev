@@ -1,9 +1,9 @@
-; RUN: firtool --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Extract.anno.json %s | FileCheck %s --check-prefixes CHECK,EXTRACT
-; RUN: firtool --lowering-options=emitBindComments --preserve-values=named --annotation-file %s.anno.json %s | FileCheck %s --check-prefixes CHECK,NOEXTRACT
-; RUN: firtool --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Extract.anno.json %s --annotation-file %s.YAML.anno.json | FileCheck %s --check-prefixes YAML
-; RUN: firtool --lowering-options=emitBindComments --split-verilog --annotation-file %s.anno.json %s -o %t.folder > %t  && cat %t.folder/MyView_companion.sv  | FileCheck %s --check-prefixes MYVIEW_COMPANION
-; RUN: firtool --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Prefix.anno.json %s | FileCheck %s --check-prefixes PREFIX
-; RUN: firtool --annotation-file %s.anno.json %s --disable-opt
+; RUN: firtool --no-dedup --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Extract.anno.json %s | FileCheck %s --check-prefixes CHECK,EXTRACT
+; RUN: firtool --no-dedup --lowering-options=emitBindComments --preserve-values=named --annotation-file %s.anno.json %s | FileCheck %s --check-prefixes CHECK,NOEXTRACT
+; RUN: firtool --no-dedup --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Extract.anno.json %s --annotation-file %s.YAML.anno.json | FileCheck %s --check-prefixes YAML
+; RUN: firtool --no-dedup --lowering-options=emitBindComments --split-verilog --annotation-file %s.anno.json %s -o %t.folder > %t  && cat %t.folder/MyView_companion.sv  | FileCheck %s --check-prefixes MYVIEW_COMPANION
+; RUN: firtool --no-dedup --lowering-options=emitBindComments --annotation-file %s.anno.json --annotation-file %s.Prefix.anno.json %s | FileCheck %s --check-prefixes PREFIX
+; RUN: firtool --no-dedup --annotation-file %s.anno.json %s --disable-opt
 
 circuit Top :
   extmodule BlackBox_DUT :
@@ -218,9 +218,9 @@ circuit Top :
     ; NOEXTRACT-NEXT:   assign MyView.sub_vecOfBundle[1].uint = [[DUT_submodule_w_vecOfBundle_1_uint:[a-zA-Z0-9_]+]];
     ; NOEXTRACT-NEXT:   assign MyView.ext_port_1 = [[ExtModuleWithPort_source_1:[a-zA-Z0-9_]+]];
     ; NOEXTRACT:        Tap tap (
-    ; NOEXTRACT-NEXT:     .b     (r),
     ; NOEXTRACT-NEXT:     .clock (clock),
-    ; NOEXTRACT-NEXT:     .a     (_tap_a)
+    ; NOEXTRACT-NEXT:     .a     (_tap_a),
+    ; NOEXTRACT-NEXT:     .b     (r)
     ; NOEXTRACT-NEXT:   );
     ; NOEXTRACT-NEXT: endmodule
 
@@ -310,9 +310,9 @@ circuit Top :
     ; EXTRACT-NEXT:     assign MyView.sub_vecOfBundle[1].uint = [[DUT_submodule_in_vecOfBundle_1_uint_port]];
     ; EXTRACT-NEXT:     assign MyView.ext_port_1 = [[ExtModuleWithPort_source_1_port]];
     ; EXTRACT:          Tap tap (
-    ; EXTRACT-NEXT:       .b     (r),
     ; EXTRACT-NEXT:       .clock (_tap_clock),
-    ; EXTRACT-NEXT:       .a     (_tap_a)
+    ; EXTRACT-NEXT:       .a     (_tap_a),
+    ; EXTRACT-NEXT:       .b     (r)
     ; EXTRACT-NEXT:     );
     ; EXTRACT-NEXT:   endmodule
 
@@ -487,4 +487,3 @@ circuit Top :
     ; EXTRACT:          BlackBox_DUT.v
     ; EXTRACT-NEXT:     BlackBox_DUTAndGCT.v
     ; EXTRACT-NEXT:     Wire{{[/\]}}firrtl{{[/\]}}gct{{[/\]}}BlackBox_GCT.v
-

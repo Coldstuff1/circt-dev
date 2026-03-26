@@ -4,8 +4,6 @@ add_mlir_public_c_api_library(CIRCTCAPIConversion
   LINK_LIBS PUBLIC
   CIRCTAffineToLoopSchedule
   CIRCTArcToLLVM
-  CIRCTAffineToHIR
-  CIRCTHIRToHW
   CIRCTCalyxToFSM
   CIRCTCalyxToHW
   CIRCTCalyxNative
@@ -19,10 +17,10 @@ add_mlir_public_c_api_library(CIRCTCAPIConversion
   CIRCTFSMToSV
   CIRCTHandshakeToDC
   CIRCTHandshakeToHW
-  CIRCTHIRCosim
   CIRCTHWArithToHW
   CIRCTHWToLLHD
   CIRCTHWToLLVM
+  CIRCTHWToBTOR2
   CIRCTHWToSV
   CIRCTHWToSystemC
   CIRCTLLHDToLLVM
@@ -31,7 +29,7 @@ add_mlir_public_c_api_library(CIRCTCAPIConversion
   CIRCTPipelineToHW
   CIRCTSCFToCalyx
   CIRCTSeqToSV
+  CIRCTSimToSV
   CIRCTCFToHandshake
   CIRCTVerifToSV
 )
-

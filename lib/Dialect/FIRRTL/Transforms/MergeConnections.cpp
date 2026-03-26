@@ -22,8 +22,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetails.h"
+
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
+#include "circt/Support/Debug.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -121,9 +123,14 @@ bool MergeConnection::peelConnect(StrictConnectOp connect) {
   if (count != subConnections.size())
     return false;
 
-  changed = true;
-
   auto parentType = parent.getType();
+  auto parentBaseTy = type_dyn_cast<FIRRTLBaseType>(parentType);
+
+  // Reject if not passive, we don't support aggregate constants for these.
+  if (!parentBaseTy || !parentBaseTy.isPassive())
+    return false;
+
+  changed = true;
 
   auto getMergedValue = [&](auto aggregateType) {
     SmallVector<Value> operands;
@@ -220,17 +227,16 @@ bool MergeConnection::peelConnect(StrictConnectOp connect) {
   };
 
   Value merged;
-  if (auto bundle = dyn_cast_or_null<BundleType>(parentType))
+  if (auto bundle = type_dyn_cast<BundleType>(parentType))
     merged = getMergedValue(bundle);
-  if (auto vector = dyn_cast_or_null<FVectorType>(parentType))
+  if (auto vector = type_dyn_cast<FVectorType>(parentType))
     merged = getMergedValue(vector);
   if (!merged)
     return false;
 
   // Emit strict connect if possible, fallback to normal connect.
   // Don't use emitConnect(), will split the connect apart.
-  auto parentBaseTy = type_cast<FIRRTLBaseType>(parentType);
-  if (parentBaseTy.isPassive() && !parentBaseTy.hasUninferredWidth())
+  if (!parentBaseTy.hasUninferredWidth())
     builder->create<StrictConnectOp>(connect.getLoc(), parent, merged);
   else
     builder->create<ConnectOp>(connect.getLoc(), parent, merged);
@@ -280,9 +286,9 @@ struct MergeConnectionsPass
 } // namespace
 
 void MergeConnectionsPass::runOnOperation() {
-  LLVM_DEBUG(llvm::dbgs() << "===----- Running MergeConnections "
-                             "--------------------------------------===\n"
-                          << "Module: '" << getOperation().getName() << "'\n";);
+  LLVM_DEBUG(debugPassHeader(this)
+             << "\n"
+             << "Module: '" << getOperation().getName() << "'\n");
 
   MergeConnection mergeConnection(getOperation(), enableAggressiveMerging);
   bool changed = mergeConnection.run();

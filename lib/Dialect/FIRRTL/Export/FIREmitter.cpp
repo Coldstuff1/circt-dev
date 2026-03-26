@@ -58,7 +58,8 @@ struct Emitter {
   void emitModulePorts(ArrayRef<PortInfo> ports,
                        Block::BlockArgListType arguments = {});
   void emitModuleParameters(Operation *op, ArrayAttr parameters);
-  void emitDeclaration(GroupDeclOp op);
+  void emitDeclaration(LayerOp op);
+  void emitDeclaration(OptionOp op);
 
   // Statement emission
   void emitStatementsInBlock(Block &block);
@@ -74,6 +75,7 @@ struct Emitter {
   void emitStatement(StrictConnectOp op);
   void emitStatement(PropAssignOp op);
   void emitStatement(InstanceOp op);
+  void emitStatement(InstanceChoiceOp op);
   void emitStatement(AttachOp op);
   void emitStatement(MemOp op);
   void emitStatement(InvalidValueOp op);
@@ -87,7 +89,7 @@ struct Emitter {
   void emitStatement(RefForceInitialOp op);
   void emitStatement(RefReleaseOp op);
   void emitStatement(RefReleaseInitialOp op);
-  void emitStatement(GroupOp op);
+  void emitStatement(LayerBlockOp op);
 
   template <class T>
   void emitVerifStatement(T op, StringRef mnemonic);
@@ -114,6 +116,9 @@ struct Emitter {
   void emitExpression(StringConstantOp op);
   void emitExpression(FIntegerConstantOp op);
   void emitExpression(BoolConstantOp op);
+  void emitExpression(DoubleConstantOp op);
+  void emitExpression(ListCreateOp op);
+  void emitExpression(UnresolvedPathOp op);
 
   void emitPrimExpr(StringRef mnemonic, Operation *op,
                     ArrayRef<uint32_t> attrs = {});
@@ -231,6 +236,21 @@ struct Emitter {
       ps << ")";
     });
     emitLocationAndNewLine(op);
+  }
+
+  template <typename EachFn, typename Range>
+  void emitLiteralExpression(Type type, const Range &r, EachFn eachFn) {
+    emitType(type);
+    ps << "(";
+    ps.scopedBox(PP::ibox0, [&]() {
+      interleaveComma(r, eachFn);
+      ps << ")";
+    });
+  }
+
+  void emitLiteralExpression(Type type, ValueRange values) {
+    return emitLiteralExpression(type, values,
+                                 [&](Value v) { emitSubExprIBox2(v); });
   }
 
 private:
@@ -365,7 +385,8 @@ void Emitter::emitCircuit(CircuitOp op) {
             emitModule(op);
             ps << PP::newline;
           })
-          .Case<GroupDeclOp>([&](auto op) { emitDeclaration(op); })
+          .Case<LayerOp>([&](auto op) { emitDeclaration(op); })
+          .Case<OptionOp>([&](auto op) { emitDeclaration(op); })
           .Default([&](auto op) {
             emitOpError(op, "not supported for emission inside circuit");
           });
@@ -495,22 +516,37 @@ void Emitter::emitModuleParameters(Operation *op, ArrayAttr parameters) {
   }
 }
 
-/// Emit an optional group declaration.
-void Emitter::emitDeclaration(GroupDeclOp op) {
+/// Emit a layer definition.
+void Emitter::emitDeclaration(LayerOp op) {
   startStatement();
-  ps << "declgroup " << PPExtString(op.getSymName()) << ", "
-     << PPExtString(stringifyGroupConvention(op.getConvention())) << " : ";
+  ps << "layer " << PPExtString(op.getSymName()) << ", "
+     << PPExtString(stringifyLayerConvention(op.getConvention())) << " : ";
   emitLocationAndNewLine(op);
   ps.scopedBox(PP::bbox2, [&]() {
     for (auto &bodyOp : op.getBody().getOps()) {
       TypeSwitch<Operation *>(&bodyOp)
-          .Case<GroupDeclOp>([&](auto op) { emitDeclaration(op); })
+          .Case<LayerOp>([&](auto op) { emitDeclaration(op); })
           .Default([&](auto op) {
             emitOpError(op,
-                        "not supported for emission inside group declaration");
+                        "not supported for emission inside layer definition");
           });
     }
   });
+}
+
+/// Emit an option declaration.
+void Emitter::emitDeclaration(OptionOp op) {
+  startStatement();
+  ps << "option " << PPExtString(legalize(op.getSymNameAttr())) << " :";
+  emitLocation(op);
+  ps.scopedBox(PP::bbox2, [&] {
+    for (auto caseOp : op.getBody().getOps<OptionCaseOp>()) {
+      ps << PP::newline;
+      ps << PPExtString(legalize(caseOp.getSymNameAttr()));
+      emitLocation(caseOp);
+    }
+  });
+  ps << PP::newline << PP::newline;
 }
 
 /// Check if an operation is inlined into the emission of their users. For
@@ -528,11 +564,11 @@ void Emitter::emitStatementsInBlock(Block &block) {
     TypeSwitch<Operation *>(&bodyOp)
         .Case<WhenOp, WireOp, RegOp, RegResetOp, NodeOp, StopOp, SkipOp,
               PrintFOp, AssertOp, AssumeOp, CoverOp, ConnectOp, StrictConnectOp,
-              PropAssignOp, InstanceOp, AttachOp, MemOp, InvalidValueOp,
-              SeqMemOp, CombMemOp, MemoryPortOp, MemoryDebugPortOp,
-              MemoryPortAccessOp, RefDefineOp, RefForceOp, RefForceInitialOp,
-              RefReleaseOp, RefReleaseInitialOp, GroupOp>(
-            [&](auto op) { emitStatement(op); })
+              PropAssignOp, InstanceOp, InstanceChoiceOp, AttachOp, MemOp,
+              InvalidValueOp, SeqMemOp, CombMemOp, MemoryPortOp,
+              MemoryDebugPortOp, MemoryPortAccessOp, RefDefineOp, RefForceOp,
+              RefForceInitialOp, RefReleaseOp, RefReleaseInitialOp,
+              LayerBlockOp>([&](auto op) { emitStatement(op); })
         .Default([&](auto op) {
           startStatement();
           ps << "// operation " << PPExtString(op->getName().getStringRef());
@@ -785,6 +821,33 @@ void Emitter::emitStatement(InstanceOp op) {
   }
 }
 
+void Emitter::emitStatement(InstanceChoiceOp op) {
+  startStatement();
+  auto legalName = legalize(op.getNameAttr());
+  ps << "instchoice " << PPExtString(legalName) << " of "
+     << PPExtString(legalize(op.getDefaultTargetAttr().getAttr())) << ", "
+     << PPExtString(legalize(op.getOptionNameAttr())) << " :";
+  emitLocation(op);
+  ps.scopedBox(PP::bbox2, [&] {
+    for (const auto &[optSym, targetSym] : op.getTargetChoices()) {
+      ps << PP::newline;
+      ps << PPExtString(legalize(optSym.getLeafReference()));
+      ps << " => ";
+      ps << PPExtString(legalize(targetSym.getAttr()));
+    }
+  });
+  setPendingNewline();
+
+  SmallString<16> portName(legalName);
+  portName.push_back('.');
+  unsigned baseLen = portName.size();
+  for (unsigned i = 0, e = op.getNumResults(); i < e; ++i) {
+    portName.append(legalize(op.getPortName(i)));
+    addValueName(op.getResult(i), portName);
+    portName.resize(baseLen);
+  }
+}
+
 void Emitter::emitStatement(AttachOp op) {
   emitStatementFunctionOp(PPExtString("attach"), op);
 }
@@ -964,9 +1027,9 @@ void Emitter::emitStatement(RefReleaseInitialOp op) {
   emitLocationAndNewLine(op);
 }
 
-void Emitter::emitStatement(GroupOp op) {
+void Emitter::emitStatement(LayerBlockOp op) {
   startStatement();
-  ps << "group " << op.getGroupName().getLeafReference() << " :";
+  ps << "layerblock " << op.getLayerName().getLeafReference() << " :";
   emitLocationAndNewLine(op);
   auto *body = op.getBody();
   ps.scopedBox(PP::bbox2, [&]() { emitStatementsInBlock(*body); });
@@ -1022,7 +1085,8 @@ void Emitter::emitExpression(Value value) {
           // Miscellaneous
           BitsPrimOp, HeadPrimOp, TailPrimOp, PadPrimOp, MuxPrimOp, ShlPrimOp,
           ShrPrimOp, UninferredResetCastOp, ConstCastOp, StringConstantOp,
-          FIntegerConstantOp, BoolConstantOp,
+          FIntegerConstantOp, BoolConstantOp, DoubleConstantOp, ListCreateOp,
+          UnresolvedPathOp,
           // Reference expressions
           RefSendOp, RefResolveOp, RefSubOp, RWProbeOp, RefCastOp>(
           [&](auto op) {
@@ -1182,9 +1246,31 @@ void Emitter::emitExpression(BoolConstantOp op) {
   ps << "Bool(" << (op.getValue() ? "true" : "false") << ")";
 }
 
+void Emitter::emitExpression(DoubleConstantOp op) {
+  ps << "Double(";
+  // Use APFloat::toString.
+  // Printing as double is not what we want,
+  // and this at least handles the basic cases in a way
+  // that will round-trip.
+  SmallString<16> str;
+  op.getValueAttr().getValue().toString(str);
+  ps << str;
+  ps << ")";
+}
+
 void Emitter::emitExpression(StringConstantOp op) {
   ps << "String(";
   ps.writeQuotedEscaped(op.getValue());
+  ps << ")";
+}
+
+void Emitter::emitExpression(ListCreateOp op) {
+  return emitLiteralExpression(op.getType(), op.getElements());
+}
+
+void Emitter::emitExpression(UnresolvedPathOp op) {
+  ps << "path(";
+  ps.writeQuotedEscaped(op.getTarget());
   ps << ")";
 }
 
@@ -1294,10 +1380,17 @@ void Emitter::emitType(Type type, bool includeConst) {
         emitType(type.getType());
         ps << ">";
       })
+      .Case<AnyRefType>([&](AnyRefType type) { ps << "AnyRef"; })
       .Case<StringType>([&](StringType type) { ps << "String"; })
       .Case<FIntegerType>([&](FIntegerType type) { ps << "Integer"; })
       .Case<BoolType>([&](BoolType type) { ps << "Bool"; })
+      .Case<DoubleType>([&](DoubleType type) { ps << "Double"; })
       .Case<PathType>([&](PathType type) { ps << "Path"; })
+      .Case<ListType>([&](ListType type) {
+        ps << "List<";
+        emitType(type.getElementType());
+        ps << ">";
+      })
       .Default([&](auto type) {
         llvm_unreachable("all types should be implemented");
       });
@@ -1350,7 +1443,7 @@ void circt::firrtl::registerToFIRFileTranslation() {
   static mlir::TranslateFromMLIRRegistration toFIR(
       "export-firrtl", "emit FIRRTL dialect operations to .fir output",
       [](ModuleOp module, llvm::raw_ostream &os) {
-        return exportFIRFile(module, os, targetLineLength, latestFIRVersion);
+        return exportFIRFile(module, os, targetLineLength, exportFIRVersion);
       },
       [](mlir::DialectRegistry &registry) {
         registry.insert<chirrtl::CHIRRTLDialect>();

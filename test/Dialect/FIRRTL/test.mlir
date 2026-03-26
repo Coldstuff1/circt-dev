@@ -227,14 +227,14 @@ firrtl.module @EnumTest(in %in : !firrtl.enum<a: uint<1>, b: uint<2>>,
 }
 
 // CHECK-LABEL: OpenAggTest
-// CHECK-SAME: !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>>
-firrtl.module @OpenAggTest(in %in: !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>>) {
-  %a = firrtl.opensubfield %in[a] : !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>>
+// CHECK-SAME: !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>>
+firrtl.module @OpenAggTest(in %in: !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>>) {
+  %a = firrtl.opensubfield %in[a] : !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>>
   %data = firrtl.subfield %a[data] : !firrtl.bundle<data: uint<1>>
-  %b = firrtl.opensubfield %in[b] : !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>>
-  %b_0 = firrtl.opensubindex %b[0] : !firrtl.openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>
-  %b_1 = firrtl.opensubindex %b[1] : !firrtl.openvector<openbundle<x: uint<2>, y: probe<uint<2>>>, 2>
-  %b_0_y = firrtl.opensubfield %b_0[y] : !firrtl.openbundle<x : uint<2>, y: probe<uint<2>>>
+  %b = firrtl.opensubfield %in[b] : !firrtl.openbundle<a: bundle<data: uint<1>>, b: openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>>
+  %b_0 = firrtl.opensubindex %b[0] : !firrtl.openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>
+  %b_1 = firrtl.opensubindex %b[1] : !firrtl.openvector<openbundle<x: uint<2>, y flip: probe<uint<2>>>, 2>
+  %b_0_y = firrtl.opensubfield %b_0[y] : !firrtl.openbundle<x : uint<2>, y flip: probe<uint<2>>>
 }
 
 // CHECK-LABEL: StringTest
@@ -297,27 +297,10 @@ firrtl.module @ListTest(in %s1: !firrtl.string,
   firrtl.propassign %out_objs, %objs : !firrtl.list<class<@ClassTest()>>
 }
 
-// CHECK-LABEL: MapTest
-// CHECK-SAME:  (in %in: !firrtl.map<integer, string>, out %out: !firrtl.map<integer, string>)
-firrtl.module @MapTest(in %in: !firrtl.map<integer, string>, out %out: !firrtl.map<integer, string>) {
-  // CHECK-NEXT: propassign %out, %in : !firrtl.map<integer, string>
-  firrtl.propassign %out, %in : !firrtl.map<integer, string>
-
-  // CHECK-NEXT: %[[EMPTY:.+]] = firrtl.map.create : !firrtl.map<integer, string>
-  %empty = firrtl.map.create : !firrtl.map<integer, string>
-
-  // CHECK-NEXT: %[[HELLO:.+]] = firrtl.string "hello"
-  // CHECK-NEXT: %[[WORLD:.+]] = firrtl.string "world"
-  // CHECK-NEXT: %{{.+}} = firrtl.map.create (%in -> %[[HELLO]], %[[EMPTY]] -> %[[WORLD]]) : !firrtl.map<map<integer, string>, string>
-  %hello = firrtl.string "hello"
-  %world = firrtl.string "world"
-  %mapmap = firrtl.map.create (%in -> %hello, %empty -> %world) : !firrtl.map<map<integer, string>, string>
-}
-
 // CHECK-LABEL: PropertyNestedTest
-// CHECK-SAME:  (in %in: !firrtl.map<integer, list<map<string, integer>>>, out %out: !firrtl.map<integer, list<map<string, integer>>>)
-firrtl.module @PropertyNestedTest(in %in: !firrtl.map<integer, list<map<string, integer>>>, out %out: !firrtl.map<integer, list<map<string, integer>>>) {
-  firrtl.propassign %out, %in : !firrtl.map<integer, list<map<string, integer>>>
+// CHECK-SAME:  (in %in: !firrtl.list<list<integer>>, out %out: !firrtl.list<list<integer>>)
+firrtl.module @PropertyNestedTest(in %in: !firrtl.list<list<integer>>, out %out: !firrtl.list<list<integer>>) {
+  firrtl.propassign %out, %in : !firrtl.list<list<integer>>
 }
 
 // CHECK-LABEL: firrtl.module @PathTest
@@ -342,6 +325,31 @@ firrtl.module @BoolTest(in %in: !firrtl.bool, out %out: !firrtl.bool) {
   %0 = firrtl.bool true
   // CHECK: %1 = firrtl.bool false
   %1 = firrtl.bool false
+}
+
+// CHECK-LABEL: DoubleTest 
+// CHECK-SAME:  (in %in: !firrtl.double, out %out: !firrtl.double)
+firrtl.module @DoubleTest(in %in: !firrtl.double, out %out: !firrtl.double) {
+  firrtl.propassign %out, %in : !firrtl.double
+
+  // CHECK: firrtl.double 0.
+  firrtl.double 0. : f64
+  // CHECK: firrtl.double -0.
+  firrtl.double -0.
+  // CHECK: firrtl.double 1.23456
+  firrtl.double 123.456
+}
+
+// CHECK-LABEL: AnyRefTest
+// CHECK-SAME: (in %in: !firrtl.anyref, out %out: !firrtl.anyref, in %[[REF:.+]]: !firrtl.class<@ClassTest()>, out %[[REF_OUT:.+]]: !firrtl.anyref)
+firrtl.module @AnyRefTest(in %in: !firrtl.anyref, out %out: !firrtl.anyref, in %ref: !firrtl.class<@ClassTest()>, out %anyref: !firrtl.anyref) {
+  // CHECK: firrtl.propassign %out, %in : !firrtl.anyref
+  firrtl.propassign %out, %in : !firrtl.anyref
+
+  // CHECK: %[[CAST:.+]] = firrtl.object.anyref_cast %[[REF]]
+  // CHECK: firrtl.propassign %[[REF_OUT]], %[[CAST]]
+  %0 = firrtl.object.anyref_cast %ref : !firrtl.class<@ClassTest()>
+  firrtl.propassign %anyref, %0 : !firrtl.anyref
 }
 
 // CHECK-LABEL: TypeAlias

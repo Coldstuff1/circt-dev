@@ -238,8 +238,8 @@ private:
           convertArithBinaryOp<XorLibOp, XorOp>(op, wires, b);
         })
         .Case([&](MuxLibOp op) {
-          auto sel = wireIn(op.getSel(), op.instanceName(),
-                            op.portName(op.getSel()), b);
+          auto sel = wireIn(op.getCond(), op.instanceName(),
+                            op.portName(op.getCond()), b);
           auto tru = wireIn(op.getTru(), op.instanceName(),
                             op.portName(op.getTru()), b);
           auto fal = wireIn(op.getFal(), op.instanceName(),
@@ -277,13 +277,14 @@ private:
                             op.portName(op.getClk()), b);
           auto reset = wireIn(op.getReset(), op.instanceName(),
                               op.portName(op.getReset()), b);
+          auto seqClk = b.create<seq::ToClockOp>(clk);
           auto doneReg =
-              reg(writeEn, clk, reset, op.instanceName() + "_done_reg", b);
+              reg(writeEn, seqClk, reset, op.instanceName() + "_done_reg", b);
           auto done =
               wireOut(doneReg, op.instanceName(), op.portName(op.getDone()), b);
           auto clockEn = b.create<AndOp>(writeEn, createOrFoldNot(done, b));
           auto outReg =
-              regCe(in, clk, clockEn, reset, op.instanceName() + "_reg", b);
+              regCe(in, seqClk, clockEn, reset, op.instanceName() + "_reg", b);
           auto out = wireOut(outReg, op.instanceName(), "", b);
           wires.append({in.getInput(), writeEn.getInput(), clk.getInput(),
                         reset.getInput(), out, done});
@@ -313,6 +314,10 @@ private:
         .Case([&](WireLibOp op) {
           auto wire = wireIn(op.getIn(), op.instanceName(), "", b);
           wires.append({wire.getInput(), wire});
+        })
+        .Case([&](UndefLibOp op) {
+          auto undef = b.create<sv::ConstantXOp>(op.getType());
+          wires.append({undef});
         })
         .Case([&](PadLibOp op) {
           auto in =

@@ -322,8 +322,10 @@ static LogicalResult convertExtMemoryOps(HWModuleOp mod) {
     // Get the attached extmemory external module.
     auto extmemInstance = cast<hw::InstanceOp>(*arg.getUsers().begin());
     auto extmemMod =
-        cast<hw::HWModuleExternOp>(extmemInstance.getReferencedModuleSlow());
-    auto portInfo = extmemMod.getPortList();
+        cast<hw::HWModuleExternOp>(SymbolTable::lookupNearestSymbolFrom(
+            extmemInstance, extmemInstance.getModuleNameAttr()));
+
+    ModulePortInfo portInfo(extmemMod.getPortList());
 
     // The extmemory external module's interface is a direct wrapping of the
     // original handshake.extmemory operation in- and output types. Remove the
@@ -499,8 +501,8 @@ struct RTLBuilder {
            "No global reset provided to this RTLBuilder - a reset "
            "signal must be provided to the reg(...) function.");
 
-    return b.create<seq::CompRegOp>(loc, in.getType(), in, resolvedClk, name,
-                                    resolvedRst, rstValue, hw::InnerSymAttr());
+    return b.create<seq::CompRegOp>(loc, in, resolvedClk, resolvedRst, rstValue,
+                                    name);
   }
 
   Value cmp(Value lhs, Value rhs, comb::ICmpPredicate predicate,
@@ -1884,7 +1886,7 @@ static LogicalResult convertFuncOp(ESITypeConverter &typeConverter,
       UnitRateConversionPattern<arith::AndIOp, comb::AndOp>,
       UnitRateConversionPattern<arith::OrIOp, comb::OrOp>,
       UnitRateConversionPattern<arith::XOrIOp, comb::XorOp>,
-      UnitRateConversionPattern<arith::ShLIOp, comb::OrOp>,
+      UnitRateConversionPattern<arith::ShLIOp, comb::ShlOp>,
       UnitRateConversionPattern<arith::ShRUIOp, comb::ShrUOp>,
       UnitRateConversionPattern<arith::ShRSIOp, comb::ShrSOp>,
       UnitRateConversionPattern<arith::SelectOp, comb::MuxOp>,

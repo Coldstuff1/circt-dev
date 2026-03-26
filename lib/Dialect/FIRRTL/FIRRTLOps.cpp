@@ -14,6 +14,7 @@
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLAnnotations.h"
 #include "circt/Dialect/FIRRTL/FIRRTLAttributes.h"
+#include "circt/Dialect/FIRRTL/FIRRTLInstanceImplementation.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/FIRRTL/FIRRTLVisitors.h"
@@ -23,9 +24,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -204,7 +205,7 @@ Flow firrtl::foldFlow(Value val, Flow accumulatedFlow) {
       // Registers, Wires, and behavioral memory ports are always Duplex.
       .Case<RegOp, RegResetOp, WireOp, MemoryPortOp>(
           [](auto) { return Flow::Duplex; })
-      .Case<InstanceOp>([&](auto inst) {
+      .Case<InstanceOp, InstanceChoiceOp>([&](auto inst) {
         auto resultNo = cast<OpResult>(val).getResultNumber();
         if (inst.getPortDirection(resultNo) == Direction::Out)
           return accumulatedFlow;
@@ -338,13 +339,6 @@ void CircuitOp::build(OpBuilder &builder, OperationState &result,
   bodyRegion->push_back(body);
 }
 
-// Return the main module that is the entry point of the circuit.
-FModuleLike CircuitOp::getMainModule(mlir::SymbolTable *symtbl) {
-  if (symtbl)
-    return symtbl->lookup<FModuleLike>(getName());
-  return dyn_cast_or_null<FModuleLike>(lookupSymbol(getName()));
-}
-
 static ParseResult parseCircuitOpAttrs(OpAsmParser &parser,
                                        NamedAttrList &resultAttrs) {
   auto result = parser.parseOptionalAttrDictWithKeyword(resultAttrs);
@@ -376,21 +370,6 @@ LogicalResult CircuitOp::verifyRegions() {
   }
 
   mlir::SymbolTable symtbl(getOperation());
-
-  // Check that a module matching the "main" module exists in the circuit.
-  auto mainModule = getMainModule(&symtbl);
-  if (!mainModule)
-    return emitOpError("must contain one module that matches main name '" +
-                       main + "'");
-
-  // Even though ClassOps are FModuleLike, they are not a hardware entity, so
-  // we ban them from being our top-module in the design.
-  if (isa<ClassOp>(mainModule))
-    return emitOpError("must have a non-class top module");
-
-  // Check that the main module is public.
-  if (!mainModule.isPublic())
-    return emitOpError("main module '" + main + "' must be public");
 
   // Store a mapping of defname to either the first external module
   // that defines it or, preferentially, the first external module
@@ -532,31 +511,69 @@ static hw::ModulePort::Direction dirFtoH(Direction dir) {
   abort();
 }
 
-static hw::ModulePortInfo getPortListImpl(FModuleLike module) {
+static SmallVector<hw::PortInfo> getPortListImpl(FModuleLike module) {
   SmallVector<hw::PortInfo> results;
+  auto aname = StringAttr::get(module.getContext(),
+                               hw::HWModuleLike::getPortSymbolAttrName());
+  auto emptyDict = DictionaryAttr::get(module.getContext());
   for (unsigned i = 0, e = getNumPorts(module); i < e; ++i) {
-    results.push_back({{module.getPortNameAttr(i), module.getPortType(i),
-                        dirFtoH(module.getPortDirection(i))},
-                       i,
-                       module.getPortSymbolAttr(i),
-                       {},
-                       module.getPortLocation(i)});
+    auto sym = module.getPortSymbolAttr(i);
+    results.push_back(
+        {{module.getPortNameAttr(i), module.getPortType(i),
+          dirFtoH(module.getPortDirection(i))},
+         i,
+         sym ? DictionaryAttr::get(
+                   module.getContext(),
+                   ArrayRef<mlir::NamedAttribute>{NamedAttribute{aname, sym}})
+             : emptyDict,
+         module.getPortLocation(i)});
   }
-  return hw::ModulePortInfo(results);
+  return results;
 }
 
-hw::ModulePortInfo FModuleOp::getPortList() { return ::getPortListImpl(*this); }
-
-hw::ModulePortInfo FExtModuleOp::getPortList() {
+SmallVector<::circt::hw::PortInfo> FModuleOp::getPortList() {
   return ::getPortListImpl(*this);
 }
 
-hw::ModulePortInfo FIntModuleOp::getPortList() {
+SmallVector<::circt::hw::PortInfo> FExtModuleOp::getPortList() {
   return ::getPortListImpl(*this);
 }
 
-hw::ModulePortInfo FMemModuleOp::getPortList() {
+SmallVector<::circt::hw::PortInfo> FIntModuleOp::getPortList() {
   return ::getPortListImpl(*this);
+}
+
+SmallVector<::circt::hw::PortInfo> FMemModuleOp::getPortList() {
+  return ::getPortListImpl(*this);
+}
+
+static hw::PortInfo getPortImpl(FModuleLike module, size_t idx) {
+  return {{module.getPortNameAttr(idx), module.getPortType(idx),
+           dirFtoH(module.getPortDirection(idx))},
+          idx,
+          DictionaryAttr::get(
+              module.getContext(),
+              ArrayRef<mlir::NamedAttribute>{NamedAttribute{
+                  StringAttr::get(module.getContext(),
+                                  hw::HWModuleLike::getPortSymbolAttrName()),
+                  module.getPortSymbolAttr(idx)}}),
+          module.getPortLocation(idx)};
+}
+
+::circt::hw::PortInfo FModuleOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
+}
+
+::circt::hw::PortInfo FExtModuleOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
+}
+
+::circt::hw::PortInfo FIntModuleOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
+}
+
+::circt::hw::PortInfo FMemModuleOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
 }
 
 // Return the port with the specified name.
@@ -1444,7 +1461,7 @@ static LogicalResult verifyPortSymbolUses(FModuleLike module,
 
     // verify that the class exists.
     auto className = classType.getNameAttr();
-    auto classOp = dyn_cast_or_null<ClassOp>(
+    auto classOp = dyn_cast_or_null<ClassLike>(
         symbolTable.lookupSymbolIn(circuitOp, className));
     if (!classOp)
       return module.emitOpError() << "references unknown class " << className;
@@ -1514,64 +1531,69 @@ ConventionAttr FMemModuleOp::getConventionAttr() {
 }
 
 //===----------------------------------------------------------------------===//
-// ClassOp
+// ClassLike Helpers
 //===----------------------------------------------------------------------===//
 
-void ClassOp::build(OpBuilder &builder, OperationState &result, StringAttr name,
-                    ArrayRef<PortInfo> ports) {
-  assert(
-      llvm::all_of(ports,
-                   [](const auto &port) { return port.annotations.empty(); }) &&
-      "class ports may not have annotations");
+LogicalResult firrtl::detail::verifyTypeAgainstClassLike(
+    ClassLike classOp, ClassType type,
+    function_ref<InFlightDiagnostic()> emitError) {
+  // This check is probably not required, but done for sanity.
+  auto name = type.getNameAttr().getAttr();
+  auto expectedName = classOp.getModuleNameAttr();
+  if (name != expectedName)
+    return emitError() << "type has wrong name, got " << name << ", expected "
+                       << expectedName;
 
-  buildModuleWithoutAnnos(builder, result, name, ports);
+  auto elements = type.getElements();
+  auto numElements = elements.size();
+  auto expectedNumElements = classOp.getNumPorts();
+  if (numElements != expectedNumElements)
+    return emitError() << "has wrong number of ports, got " << numElements
+                       << ", expected " << expectedNumElements;
 
-  // Create a region and a block for the body.
-  auto *bodyRegion = result.regions[0].get();
-  Block *body = new Block();
-  bodyRegion->push_back(body);
+  auto portNames = classOp.getPortNames();
+  auto portDirections = classOp.getPortDirections();
+  auto portTypes = classOp.getPortTypes();
 
-  // Add arguments to the body block.
-  for (auto &elt : ports)
-    body->addArgument(elt.type, elt.loc);
+  for (unsigned i = 0; i < numElements; ++i) {
+    auto element = elements[i];
+
+    auto name = element.name;
+    auto expectedName = portNames[i];
+    if (name != expectedName)
+      return emitError() << "port #" << i << " has wrong name, got " << name
+                         << ", expected " << expectedName;
+
+    auto direction = element.direction;
+    auto expectedDirection = Direction(portDirections[i]);
+    if (direction != expectedDirection)
+      return emitError() << "port " << name << " has wrong direction, got "
+                         << direction::toString(direction) << ", expected "
+                         << direction::toString(expectedDirection);
+
+    auto type = element.type;
+    auto expectedType = cast<TypeAttr>(portTypes[i]).getValue();
+    if (type != expectedType)
+      return emitError() << "port " << name << " has wrong type, got " << type
+                         << ", expected " << expectedType;
+  }
+
+  return success();
 }
 
-void ClassOp::print(OpAsmPrinter &p) {
-  p << " ";
-
-  // Print the visibility of the class.
-  StringRef visibilityAttrName = SymbolTable::getVisibilityAttrName();
-  if (auto visibility = (*this)->getAttrOfType<StringAttr>(visibilityAttrName))
-    p << visibility.getValue() << ' ';
-
-  // Print the class name.
-  p.printSymbolName(getName());
-
-  auto portDirections = direction::unpackAttribute(getPortDirectionsAttr());
-
-  auto needPortNamesAttr =
-      printModulePorts(p, getBodyBlock(), portDirections, getPortNames(),
-                       getPortTypes(), {}, getPortSyms(), getPortLocations());
-
-  // Print the attr-dict.
-  SmallVector<StringRef, 8> omittedAttrs = {
-      "sym_name", "portNames",     "portTypes",       "portDirections",
-      "portSyms", "portLocations", visibilityAttrName};
-
-  // We can omit the portNames if they were able to be printed as properly as
-  // block arguments.
-  if (!needPortNamesAttr)
-    omittedAttrs.push_back("portNames");
-
-  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), omittedAttrs);
-
-  p << " ";
-  // Print the body.
-  p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
-                /*printBlockTerminators=*/true);
+ClassType firrtl::detail::getInstanceTypeForClassLike(ClassLike classOp) {
+  auto n = classOp.getNumPorts();
+  SmallVector<ClassElement> elements;
+  elements.reserve(n);
+  for (size_t i = 0; i < n; ++i)
+    elements.push_back({classOp.getPortNameAttr(i), classOp.getPortType(i),
+                        classOp.getPortDirection(i)});
+  auto name = FlatSymbolRefAttr::get(classOp.getNameAttr());
+  return ClassType::get(name, elements);
 }
 
-ParseResult ClassOp::parse(OpAsmParser &parser, OperationState &result) {
+static ParseResult parseClassLike(OpAsmParser &parser, OperationState &result,
+                                  bool hasSSAIdentifiers) {
   auto *context = result.getContext();
   auto &builder = parser.getBuilder();
 
@@ -1592,13 +1614,13 @@ ParseResult ClassOp::parse(OpAsmParser &parser, OperationState &result) {
   SmallVector<Attribute, 4> portAnnotations;
   SmallVector<Attribute, 4> portSyms;
   SmallVector<Attribute, 4> portLocs;
-  if (parseModulePorts(parser, /*hasSSAIdentifiers=*/true,
+  if (parseModulePorts(parser, hasSSAIdentifiers,
                        /*supportsSymbols=*/false, entryArgs, portDirections,
                        portNames, portTypes, portAnnotations, portSyms,
                        portLocs))
     return failure();
 
-  // Ports on ClassOp cannot have annotations
+  // Ports on ClassLike ops cannot have annotations
   for (auto annos : portAnnotations)
     if (!cast<ArrayAttr>(annos).empty())
       return failure();
@@ -1638,18 +1660,97 @@ ParseResult ClassOp::parse(OpAsmParser &parser, OperationState &result) {
   // Notably missing compared to other FModuleLike, we do not track port
   // annotations, nor port symbols, on classes.
 
-  // Parse the optional function body.
-  auto *body = result.addRegion();
-  if (parser.parseRegion(*body, entryArgs))
-    return failure();
-  if (body->empty())
-    body->push_back(new Block());
+  // Add the region (unused by extclass).
+  auto *bodyRegion = result.addRegion();
+
+  if (hasSSAIdentifiers) {
+    if (parser.parseRegion(*bodyRegion, entryArgs))
+      return failure();
+    if (bodyRegion->empty())
+      bodyRegion->push_back(new Block());
+  }
 
   return success();
 }
 
-LogicalResult ClassOp::verify() {
+static void printClassLike(OpAsmPrinter &p, ClassLike op) {
+  p << ' ';
 
+  // Print the visibility of the class.
+  StringRef visibilityAttrName = SymbolTable::getVisibilityAttrName();
+  if (auto visibility = op->getAttrOfType<StringAttr>(visibilityAttrName))
+    p << visibility.getValue() << ' ';
+
+  // Print the class name.
+  p.printSymbolName(op.getName());
+
+  // Both classes and external classes have a body, but it is always empty for
+  // external classes.
+  Region &region = op->getRegion(0);
+  Block *body = nullptr;
+  if (!region.empty())
+    body = &region.front();
+
+  auto portDirections = direction::unpackAttribute(op.getPortDirectionsAttr());
+
+  auto needPortNamesAttr = printModulePorts(
+      p, body, portDirections, op.getPortNames(), op.getPortTypes(), {},
+      op.getPortSymbols(), op.getPortLocations());
+
+  // Print the attr-dict.
+  SmallVector<StringRef, 8> omittedAttrs = {
+      "sym_name", "portNames",     "portTypes",       "portDirections",
+      "portSyms", "portLocations", visibilityAttrName};
+
+  // We can omit the portNames if they were able to be printed as properly as
+  // block arguments.
+  if (!needPortNamesAttr)
+    omittedAttrs.push_back("portNames");
+
+  p.printOptionalAttrDictWithKeyword(op->getAttrs(), omittedAttrs);
+
+  // print the body if it exists.
+  if (!region.empty()) {
+    p << " ";
+    auto printEntryBlockArgs = false;
+    auto printBlockTerminators = false;
+    p.printRegion(region, printEntryBlockArgs, printBlockTerminators);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// ClassOp
+//===----------------------------------------------------------------------===//
+
+void ClassOp::build(OpBuilder &builder, OperationState &result, StringAttr name,
+                    ArrayRef<PortInfo> ports) {
+  assert(
+      llvm::all_of(ports,
+                   [](const auto &port) { return port.annotations.empty(); }) &&
+      "class ports may not have annotations");
+
+  buildModuleWithoutAnnos(builder, result, name, ports);
+
+  // Create a region and a block for the body.
+  auto *bodyRegion = result.regions[0].get();
+  Block *body = new Block();
+  bodyRegion->push_back(body);
+
+  // Add arguments to the body block.
+  for (auto &elt : ports)
+    body->addArgument(elt.type, elt.loc);
+}
+
+void ClassOp::print(OpAsmPrinter &p) {
+  printClassLike(p, cast<ClassLike>(getOperation()));
+}
+
+ParseResult ClassOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto hasSSAIdentifiers = true;
+  return parseClassLike(parser, result, hasSSAIdentifiers);
+}
+
+LogicalResult ClassOp::verify() {
   for (auto operand : getBodyBlock()->getArguments()) {
     auto type = operand.getType();
     if (!isa<PropertyType>(type)) {
@@ -1696,60 +1797,12 @@ ArrayAttr ClassOp::getPortAnnotationsAttr() {
   return ArrayAttr::get(getContext(), {});
 }
 
-hw::ModulePortInfo ClassOp::getPortList() { return ::getPortListImpl(*this); }
-
-LogicalResult
-ClassOp::verifyType(ClassType type,
-                    function_ref<InFlightDiagnostic()> emitError) {
-  // This check is probably not required, but done for sanity.
-  auto name = type.getNameAttr().getAttr();
-  auto expectedName = getModuleNameAttr();
-  if (name != expectedName)
-    return emitError() << "type has wrong name, got " << name << ", expected "
-                       << expectedName;
-
-  auto elements = type.getElements();
-  auto numElements = elements.size();
-  auto expectedNumElements = getNumPorts();
-  if (numElements != expectedNumElements)
-    return emitError() << "has wrong number of ports, got " << numElements
-                       << ", expected " << expectedNumElements;
-
-  for (unsigned i = 0; i < numElements; ++i) {
-    auto element = elements[i];
-
-    auto name = element.name;
-    auto expectedName = getPortNameAttr(i);
-    if (name != expectedName)
-      return emitError() << "port #" << i << " has wrong name, got " << name
-                         << ", expected " << expectedName;
-
-    auto direction = element.direction;
-    auto expectedDirection = getPortDirection(i);
-    if (direction != expectedDirection)
-      return emitError() << "port " << name << " has wrong direction, got "
-                         << direction::toString(direction) << ", expected "
-                         << direction::toString(expectedDirection);
-
-    auto type = element.type;
-    auto expectedType = getPortType(i);
-    if (type != expectedType)
-      return emitError() << "port " << name << " has wrong type, got " << type
-                         << ", expected " << expectedType;
-  }
-
-  return success();
+SmallVector<::circt::hw::PortInfo> ClassOp::getPortList() {
+  return ::getPortListImpl(*this);
 }
 
-ClassType ClassOp::getInstanceType() {
-  auto n = getNumPorts();
-  SmallVector<ClassElement> elements;
-  elements.reserve(n);
-  for (size_t i = 0; i < n; ++i)
-    elements.push_back(
-        {getPortNameAttr(i), getPortType(i), getPortDirection(i)});
-  auto name = FlatSymbolRefAttr::get(getNameAttr());
-  return ClassType::get(name, elements);
+::circt::hw::PortInfo ClassOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
 }
 
 BlockArgument ClassOp::getArgument(size_t portNumber) {
@@ -1758,31 +1811,92 @@ BlockArgument ClassOp::getArgument(size_t portNumber) {
 
 bool ClassOp::canDiscardOnUseEmpty() {
   // ClassOps are referenced by ClassTypes, and these uses are not
+  // discoverable by the symbol infrastructure. Return false here to prevent
+  // passes like symbolDCE from removing our classes.
+  return false;
+}
+
+//===----------------------------------------------------------------------===//
+// ExtClassOp
+//===----------------------------------------------------------------------===//
+
+void ExtClassOp::build(OpBuilder &builder, OperationState &result,
+                       StringAttr name, ArrayRef<PortInfo> ports) {
+  assert(
+      llvm::all_of(ports,
+                   [](const auto &port) { return port.annotations.empty(); }) &&
+      "class ports may not have annotations");
+
+  buildModuleWithoutAnnos(builder, result, name, ports);
+}
+
+void ExtClassOp::print(OpAsmPrinter &p) {
+  printClassLike(p, cast<ClassLike>(getOperation()));
+}
+
+ParseResult ExtClassOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto hasSSAIdentifiers = false;
+  return parseClassLike(parser, result, hasSSAIdentifiers);
+}
+
+LogicalResult
+ExtClassOp::verifySymbolUses(::mlir::SymbolTableCollection &symbolTable) {
+  return verifyPortSymbolUses(cast<FModuleLike>(getOperation()), symbolTable);
+}
+
+void ExtClassOp::getAsmBlockArgumentNames(mlir::Region &region,
+                                          mlir::OpAsmSetValueNameFn setNameFn) {
+  getAsmBlockArgumentNamesImpl(getOperation(), region, setNameFn);
+}
+
+SmallVector<PortInfo> ExtClassOp::getPorts() {
+  return ::getPortImpl(cast<FModuleLike>((Operation *)*this));
+}
+
+void ExtClassOp::erasePorts(const llvm::BitVector &portIndices) {
+  ::erasePorts(cast<FModuleLike>((Operation *)*this), portIndices);
+}
+
+void ExtClassOp::insertPorts(ArrayRef<std::pair<unsigned, PortInfo>> ports) {
+  ::insertPorts(cast<FModuleLike>((Operation *)*this), ports);
+}
+
+Convention ExtClassOp::getConvention() { return Convention::Internal; }
+
+ConventionAttr ExtClassOp::getConventionAttr() {
+  return ConventionAttr::get(getContext(), getConvention());
+}
+
+ArrayAttr ExtClassOp::getParameters() { return {}; }
+
+ArrayAttr ExtClassOp::getPortAnnotationsAttr() {
+  return ArrayAttr::get(getContext(), {});
+}
+
+SmallVector<::circt::hw::PortInfo> ExtClassOp::getPortList() {
+  return ::getPortListImpl(*this);
+}
+
+::circt::hw::PortInfo ExtClassOp::getPort(size_t idx) {
+  return ::getPortImpl(*this, idx);
+}
+
+bool ExtClassOp::canDiscardOnUseEmpty() {
+  // ClassOps are referenced by ClassTypes, and these uses are not
   // discovereable by the symbol infrastructure. Return false here to prevent
   // passes like symbolDCE from removing our classes.
   return false;
 }
 
 //===----------------------------------------------------------------------===//
-// Declarations
+// InstanceOp
 //===----------------------------------------------------------------------===//
 
-/// Lookup the module or extmodule for the symbol.  This returns null on
-/// invalid IR.
-Operation *InstanceOp::getReferencedModuleSlow() {
+SmallVector<::circt::hw::PortInfo> InstanceOp::getPortList() {
   auto circuit = (*this)->getParentOfType<CircuitOp>();
   if (!circuit)
-    return nullptr;
-
-  return circuit.lookupSymbol<FModuleLike>(getModuleNameAttr());
-}
-
-hw::ModulePortInfo InstanceOp::getPortList() {
-  return cast<hw::PortList>(getReferencedModuleSlow()).getPortList();
-}
-
-Operation *InstanceOp::getReferencedModule(SymbolTable &symbolTable) {
-  return symbolTable.lookup(getModuleNameAttr().getLeafReference());
+    llvm::report_fatal_error("instance op not in circuit");
+  return circuit.lookupSymbol<hw::PortList>(getModuleNameAttr()).getPortList();
 }
 
 void InstanceOp::build(OpBuilder &builder, OperationState &result,
@@ -1838,7 +1952,7 @@ void InstanceOp::build(OpBuilder &builder, OperationState &result,
                        FModuleLike module, StringRef name,
                        NameKindEnum nameKind, ArrayRef<Attribute> annotations,
                        ArrayRef<Attribute> portAnnotations, bool lowerToBind,
-                       StringAttr innerSym) {
+                       hw::InnerSymAttr innerSym) {
 
   // Gather the result types.
   SmallVector<Type> resultTypes;
@@ -1863,8 +1977,30 @@ void InstanceOp::build(OpBuilder &builder, OperationState &result,
       NameKindEnumAttr::get(builder.getContext(), nameKind),
       module.getPortDirectionsAttr(), module.getPortNamesAttr(),
       builder.getArrayAttr(annotations), portAnnotationsAttr,
-      lowerToBind ? builder.getUnitAttr() : UnitAttr(),
-      innerSym ? hw::InnerSymAttr::get(innerSym) : hw::InnerSymAttr());
+      lowerToBind ? builder.getUnitAttr() : UnitAttr(), innerSym);
+}
+
+void InstanceOp::build(OpBuilder &builder, OperationState &odsState,
+                       ArrayRef<PortInfo> ports, StringRef moduleName,
+                       StringRef name, NameKindEnum nameKind,
+                       ArrayRef<Attribute> annotations, bool lowerToBind,
+                       hw::InnerSymAttr innerSym) {
+
+  // Gather the result types.
+  SmallVector<Type> newResultTypes;
+  SmallVector<Direction> newPortDirections;
+  SmallVector<Attribute> newPortNames;
+  SmallVector<Attribute> newPortAnnotations;
+  for (auto &p : ports) {
+    newResultTypes.push_back(p.type);
+    newPortDirections.push_back(p.direction);
+    newPortNames.push_back(p.name);
+    newPortAnnotations.push_back(p.annotations.getArrayAttr());
+  }
+
+  return build(builder, odsState, newResultTypes, moduleName, name, nameKind,
+               newPortDirections, newPortNames, annotations, newPortAnnotations,
+               lowerToBind, innerSym);
 }
 
 /// Builds a new `InstanceOp` with the ports listed in `portIndices` erased, and
@@ -1966,110 +2102,8 @@ InstanceOp::cloneAndInsertPorts(ArrayRef<std::pair<unsigned, PortInfo>> ports) {
 }
 
 LogicalResult InstanceOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto module = (*this)->getParentOfType<FModuleOp>();
-  auto referencedModule = symbolTable.lookupNearestSymbolFrom<FModuleLike>(
-      *this, getModuleNameAttr());
-  if (!referencedModule) {
-    return emitOpError("invalid symbol reference");
-  }
-
-  // Check that this instance doesn't recursively instantiate its wrapping
-  // module.
-  if (referencedModule == module) {
-    auto diag = emitOpError()
-                << "is a recursive instantiation of its containing module";
-    return diag.attachNote(module.getLoc())
-           << "containing module declared here";
-  }
-
-  // Small helper add a note to the original declaration.
-  auto emitNote = [&](InFlightDiagnostic &&diag) -> InFlightDiagnostic && {
-    diag.attachNote(referencedModule->getLoc())
-        << "original module declared here";
-    return std::move(diag);
-  };
-
-  // Check that all the attribute arrays are the right length up front.  This
-  // lets us safely use the port name in error messages below.
-  size_t numResults = getNumResults();
-  size_t numExpected = referencedModule.getNumPorts();
-  if (numResults != numExpected) {
-    return emitNote(emitOpError() << "has a wrong number of results; expected "
-                                  << numExpected << " but got " << numResults);
-  }
-  if (getPortDirections().getBitWidth() != numExpected)
-    return emitNote(emitOpError("the number of port directions should be "
-                                "equal to the number of results"));
-  if (getPortNames().size() != numExpected)
-    return emitNote(emitOpError("the number of port names should be "
-                                "equal to the number of results"));
-  if (getPortAnnotations().size() != numExpected)
-    return emitNote(emitOpError("the number of result annotations should be "
-                                "equal to the number of results"));
-
-  // Check that the port names match the referenced module.
-  if (getPortNamesAttr() != referencedModule.getPortNamesAttr()) {
-    // We know there is an error, try to figure out whats wrong.
-    auto instanceNames = getPortNames();
-    auto moduleNames = referencedModule.getPortNamesAttr();
-    // First compare the sizes:
-    if (instanceNames.size() != moduleNames.size()) {
-      return emitNote(emitOpError()
-                      << "has a wrong number of directions; expected "
-                      << moduleNames.size() << " but got "
-                      << instanceNames.size());
-    }
-    // Next check the values:
-    for (size_t i = 0; i != numResults; ++i) {
-      if (instanceNames[i] != moduleNames[i]) {
-        return emitNote(emitOpError()
-                        << "name for port " << i << " must be "
-                        << moduleNames[i] << ", but got " << instanceNames[i]);
-      }
-    }
-    llvm_unreachable("should have found something wrong");
-  }
-
-  // Check that the types match.
-  for (size_t i = 0; i != numResults; i++) {
-    auto resultType = getResult(i).getType();
-    auto expectedType = referencedModule.getPortType(i);
-    if (resultType != expectedType) {
-      return emitNote(emitOpError()
-                      << "result type for " << getPortName(i) << " must be "
-                      << expectedType << ", but got " << resultType);
-    }
-  }
-
-  // Check that the port directions are consistent with the referenced module's.
-  if (getPortDirectionsAttr() != referencedModule.getPortDirectionsAttr()) {
-    // We know there is an error, try to figure out whats wrong.
-    auto instanceDirectionAttr = getPortDirectionsAttr();
-    auto moduleDirectionAttr = referencedModule.getPortDirectionsAttr();
-    // First compare the sizes:
-    auto expectedWidth = moduleDirectionAttr.getValue().getBitWidth();
-    auto actualWidth = instanceDirectionAttr.getValue().getBitWidth();
-    if (expectedWidth != actualWidth) {
-      return emitNote(emitOpError()
-                      << "has a wrong number of directions; expected "
-                      << expectedWidth << " but got " << actualWidth);
-    }
-    // Next check the values.
-    auto instanceDirs = direction::unpackAttribute(instanceDirectionAttr);
-    auto moduleDirs = direction::unpackAttribute(moduleDirectionAttr);
-    for (size_t i = 0; i != numResults; ++i) {
-      if (instanceDirs[i] != moduleDirs[i]) {
-        return emitNote(emitOpError()
-                        << "direction for " << getPortName(i) << " must be \""
-                        << direction::toString(moduleDirs[i])
-                        << "\", but got \""
-                        << direction::toString(instanceDirs[i]) << "\"");
-      }
-    }
-    llvm_unreachable("should have found something wrong");
-  }
-
-  return success();
+  return instance_like_impl::verifyReferencedModule(*this, symbolTable,
+                                                    getModuleNameAttr());
 }
 
 StringRef InstanceOp::getInstanceName() { return getName(); }
@@ -2190,6 +2224,276 @@ std::optional<size_t> InstanceOp::getTargetResultIndex() {
   // Inner symbols on instance operations target the op not any result.
   return std::nullopt;
 }
+
+// -----------------------------------------------------------------------------
+// InstanceChoiceOp
+// -----------------------------------------------------------------------------
+
+void InstanceChoiceOp::build(
+    OpBuilder &builder, OperationState &result, FModuleLike defaultModule,
+    ArrayRef<std::pair<OptionCaseOp, FModuleLike>> cases, StringRef name,
+    NameKindEnum nameKind, ArrayRef<Attribute> annotations,
+    ArrayRef<Attribute> portAnnotations, StringAttr innerSym) {
+  // Gather the result types.
+  SmallVector<Type> resultTypes;
+  for (Attribute portType : defaultModule.getPortTypes())
+    resultTypes.push_back(cast<TypeAttr>(portType).getValue());
+
+  // Create the port annotations.
+  ArrayAttr portAnnotationsAttr;
+  if (portAnnotations.empty()) {
+    portAnnotationsAttr = builder.getArrayAttr(SmallVector<Attribute, 16>(
+        resultTypes.size(), builder.getArrayAttr({})));
+  } else {
+    portAnnotationsAttr = builder.getArrayAttr(portAnnotations);
+  }
+
+  // Gather the module & case names.
+  SmallVector<Attribute> moduleNames, caseNames;
+  moduleNames.push_back(SymbolRefAttr::get(defaultModule.getModuleNameAttr()));
+  for (auto [caseOption, caseModule] : cases) {
+    auto caseGroup = caseOption->getParentOfType<OptionOp>();
+    caseNames.push_back(SymbolRefAttr::get(caseGroup.getSymNameAttr(),
+                                           {SymbolRefAttr::get(caseOption)}));
+    moduleNames.push_back(SymbolRefAttr::get(caseModule.getModuleNameAttr()));
+  }
+
+  return build(builder, result, resultTypes, builder.getArrayAttr(moduleNames),
+               builder.getArrayAttr(caseNames), builder.getStringAttr(name),
+               NameKindEnumAttr::get(builder.getContext(), nameKind),
+               defaultModule.getPortDirectionsAttr(),
+               defaultModule.getPortNamesAttr(),
+               builder.getArrayAttr(annotations), portAnnotationsAttr,
+               innerSym ? hw::InnerSymAttr::get(innerSym) : hw::InnerSymAttr());
+}
+
+std::optional<size_t> InstanceChoiceOp::getTargetResultIndex() {
+  return std::nullopt;
+}
+
+void InstanceChoiceOp::print(OpAsmPrinter &p) {
+  // Print the instance name.
+  p << " ";
+  p.printKeywordOrString(getName());
+  if (auto attr = getInnerSymAttr()) {
+    p << " sym ";
+    p.printSymbolName(attr.getSymName());
+  }
+  if (getNameKindAttr().getValue() != NameKindEnum::DroppableName)
+    p << ' ' << stringifyNameKindEnum(getNameKindAttr().getValue());
+
+  // Print the attr-dict.
+  SmallVector<StringRef, 9> omittedAttrs = {
+      "moduleNames",     "caseNames", "name",
+      "portDirections",  "portNames", "portTypes",
+      "portAnnotations", "inner_sym", "nameKind"};
+  if (getAnnotations().empty())
+    omittedAttrs.push_back("annotations");
+  p.printOptionalAttrDict((*this)->getAttrs(), omittedAttrs);
+
+  // Print the module name.
+  p << ' ';
+
+  auto moduleNames = getModuleNamesAttr();
+  auto caseNames = getCaseNamesAttr();
+
+  p.printSymbolName(moduleNames[0].cast<FlatSymbolRefAttr>().getValue());
+
+  p << " alternatives ";
+  p.printSymbolName(
+      caseNames[0].cast<SymbolRefAttr>().getRootReference().getValue());
+  p << " { ";
+  for (size_t i = 0, n = caseNames.size(); i < n; ++i) {
+    if (i != 0)
+      p << ", ";
+
+    auto symbol = caseNames[i].cast<SymbolRefAttr>();
+    p.printSymbolName(symbol.getNestedReferences()[0].getValue());
+    p << " -> ";
+    p.printSymbolName(moduleNames[i + 1].cast<FlatSymbolRefAttr>().getValue());
+  }
+
+  p << " } ";
+
+  // Collect all the result types as TypeAttrs for printing.
+  SmallVector<Attribute> portTypes;
+  portTypes.reserve(getNumResults());
+  llvm::transform(getResultTypes(), std::back_inserter(portTypes),
+                  &TypeAttr::get);
+  auto portDirections = direction::unpackAttribute(getPortDirectionsAttr());
+  printModulePorts(p, /*block=*/nullptr, portDirections,
+                   getPortNames().getValue(), portTypes,
+                   getPortAnnotations().getValue(), {}, {});
+}
+
+ParseResult InstanceChoiceOp::parse(OpAsmParser &parser,
+                                    OperationState &result) {
+  auto *context = parser.getContext();
+  auto &resultAttrs = result.attributes;
+
+  std::string name;
+  hw::InnerSymAttr innerSymAttr;
+  SmallVector<Attribute> moduleNames;
+  SmallVector<Attribute> caseNames;
+  SmallVector<OpAsmParser::Argument> entryArgs;
+  SmallVector<Direction, 4> portDirections;
+  SmallVector<Attribute, 4> portNames;
+  SmallVector<Attribute, 4> portTypes;
+  SmallVector<Attribute, 4> portAnnotations;
+  SmallVector<Attribute, 4> portSyms;
+  SmallVector<Attribute, 4> portLocs;
+  NameKindEnumAttr nameKind;
+
+  if (parser.parseKeywordOrString(&name))
+    return failure();
+  if (succeeded(parser.parseOptionalKeyword("sym"))) {
+    if (parser.parseCustomAttributeWithFallback(
+            innerSymAttr, Type{},
+            hw::InnerSymbolTable::getInnerSymbolAttrName(),
+            result.attributes)) {
+      return failure();
+    }
+  }
+  if (parseNameKind(parser, nameKind) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  FlatSymbolRefAttr defaultModuleName;
+  if (parser.parseAttribute(defaultModuleName))
+    return failure();
+  moduleNames.push_back(defaultModuleName);
+
+  // alternatives { @opt::@case -> @target, ... }
+  {
+    FlatSymbolRefAttr optionName;
+    if (parser.parseKeyword("alternatives") ||
+        parser.parseAttribute(optionName) || parser.parseLBrace())
+      return failure();
+
+    FlatSymbolRefAttr moduleName;
+    StringAttr caseName;
+    while (succeeded(parser.parseOptionalSymbolName(caseName))) {
+      if (parser.parseArrow() || parser.parseAttribute(moduleName))
+        return failure();
+      moduleNames.push_back(moduleName);
+      caseNames.push_back(SymbolRefAttr::get(
+          optionName.getAttr(), {FlatSymbolRefAttr::get(caseName)}));
+      if (failed(parser.parseOptionalComma()))
+        break;
+    }
+    if (parser.parseRBrace())
+      return failure();
+  }
+
+  if (parseModulePorts(parser, /*hasSSAIdentifiers=*/false,
+                       /*supportsSymbols=*/false, entryArgs, portDirections,
+                       portNames, portTypes, portAnnotations, portSyms,
+                       portLocs))
+    return failure();
+
+  // Add the attributes. We let attributes defined in the attr-dict override
+  // attributes parsed out of the module signature.
+  if (!resultAttrs.get("moduleNames"))
+    result.addAttribute("moduleNames", ArrayAttr::get(context, moduleNames));
+  if (!resultAttrs.get("caseNames"))
+    result.addAttribute("caseNames", ArrayAttr::get(context, caseNames));
+  if (!resultAttrs.get("name"))
+    result.addAttribute("name", StringAttr::get(context, name));
+  result.addAttribute("nameKind", nameKind);
+  if (!resultAttrs.get("portDirections"))
+    result.addAttribute("portDirections",
+                        direction::packAttribute(context, portDirections));
+  if (!resultAttrs.get("portNames"))
+    result.addAttribute("portNames", ArrayAttr::get(context, portNames));
+  if (!resultAttrs.get("portAnnotations"))
+    result.addAttribute("portAnnotations",
+                        ArrayAttr::get(context, portAnnotations));
+
+  // Annotations and LowerToBind are omitted in the printed format if they are
+  // empty and false, respectively.
+  if (!resultAttrs.get("annotations"))
+    resultAttrs.append("annotations", parser.getBuilder().getArrayAttr({}));
+
+  // Add result types.
+  result.types.reserve(portTypes.size());
+  llvm::transform(
+      portTypes, std::back_inserter(result.types),
+      [](Attribute typeAttr) { return cast<TypeAttr>(typeAttr).getValue(); });
+
+  return success();
+}
+
+void InstanceChoiceOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
+  StringRef base = getName().empty() ? "inst" : getName();
+  for (auto [result, name] : llvm::zip(getResults(), getPortNames()))
+    setNameFn(result, (base + "_" + name.cast<StringAttr>().getValue()).str());
+}
+
+LogicalResult InstanceChoiceOp::verify() {
+  if (getCaseNamesAttr().empty())
+    return emitOpError() << "must have at least one case";
+  if (getModuleNamesAttr().size() != getCaseNamesAttr().size() + 1)
+    return emitOpError() << "number of referenced modules does not match the "
+                            "number of options";
+  return success();
+}
+
+LogicalResult
+InstanceChoiceOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto caseNames = getCaseNamesAttr();
+  for (auto moduleName : getModuleNamesAttr()) {
+    if (failed(instance_like_impl::verifyReferencedModule(
+            *this, symbolTable, moduleName.cast<FlatSymbolRefAttr>())))
+      return failure();
+  }
+
+  auto root = caseNames[0].cast<SymbolRefAttr>().getRootReference();
+  for (size_t i = 0, n = caseNames.size(); i < n; ++i) {
+    auto ref = caseNames[i].cast<SymbolRefAttr>();
+    auto refRoot = ref.getRootReference();
+    if (ref.getRootReference() != root)
+      return emitOpError() << "case " << ref
+                           << " is not in the same option group as "
+                           << caseNames[0];
+
+    if (!symbolTable.lookupNearestSymbolFrom<OptionOp>(*this, refRoot))
+      return emitOpError() << "option " << refRoot << " does not exist";
+
+    if (!symbolTable.lookupNearestSymbolFrom<OptionCaseOp>(*this, ref))
+      return emitOpError() << "option " << refRoot
+                           << " does not contain option case " << ref;
+  }
+
+  return success();
+}
+
+FlatSymbolRefAttr
+InstanceChoiceOp::getTargetOrDefaultAttr(OptionCaseOp option) {
+  auto caseNames = getCaseNamesAttr();
+  for (size_t i = 0, n = caseNames.size(); i < n; ++i) {
+    StringAttr caseSym = caseNames[i].cast<SymbolRefAttr>().getLeafReference();
+    if (caseSym == option.getSymName())
+      return getModuleNamesAttr()[i + 1].cast<FlatSymbolRefAttr>();
+  }
+  return getDefaultTargetAttr();
+}
+
+SmallVector<std::pair<SymbolRefAttr, FlatSymbolRefAttr>, 1>
+InstanceChoiceOp::getTargetChoices() {
+  auto caseNames = getCaseNamesAttr();
+  auto moduleNames = getModuleNamesAttr();
+  SmallVector<std::pair<SymbolRefAttr, FlatSymbolRefAttr>, 1> choices;
+  for (size_t i = 0; i < caseNames.size(); ++i) {
+    choices.emplace_back(caseNames[i].cast<SymbolRefAttr>(),
+                         moduleNames[i + 1].cast<FlatSymbolRefAttr>());
+  }
+
+  return choices;
+}
+
+//===----------------------------------------------------------------------===//
+// MemOp
+//===----------------------------------------------------------------------===//
 
 void MemOp::build(OpBuilder &builder, OperationState &result,
                   TypeRange resultTypes, uint32_t readLatency,
@@ -2741,28 +3045,10 @@ void WireOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 
 std::optional<size_t> WireOp::getTargetResultIndex() { return 0; }
 
-void ObjectOp::build(OpBuilder &builder, OperationState &state,
-                     ClassType type) {
-  build(builder, state, type, type.getNameAttr());
-}
-
-void ObjectOp::build(OpBuilder &builder, OperationState &state, ClassOp klass) {
-  build(builder, state, klass.getInstanceType());
-}
-
-ParseResult ObjectOp::parse(OpAsmParser &parser, OperationState &result) {
-  ClassType type;
-  if (ClassType::parseInterface(parser, type))
-    return failure();
-
-  result.addTypes(type);
-  result.addAttribute("className", type.getNameAttr());
-  return success();
-}
-
-void ObjectOp::print(OpAsmPrinter &p) {
-  p << " ";
-  getType().printInterface(p);
+void ObjectOp::build(OpBuilder &builder, OperationState &state, ClassLike klass,
+                     StringRef name) {
+  build(builder, state, klass.getInstanceType(),
+        StringAttr::get(builder.getContext(), name));
 }
 
 LogicalResult ObjectOp::verify() { return success(); }
@@ -2773,7 +3059,7 @@ LogicalResult ObjectOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto className = classType.getNameAttr();
 
   // verify that the class exists.
-  auto classOp = dyn_cast_or_null<ClassOp>(
+  auto classOp = dyn_cast_or_null<ClassLike>(
       symbolTable.lookupSymbolIn(circuitOp, className));
   if (!classOp)
     return emitOpError() << "references unknown class " << className;
@@ -2785,8 +3071,33 @@ LogicalResult ObjectOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-ClassOp ObjectOp::getReferencedClass(SymbolTable &symbolTable) {
-  return symbolTable.lookup<ClassOp>(getClassNameAttr().getLeafReference());
+StringAttr ObjectOp::getClassNameAttr() {
+  return getType().getNameAttr().getAttr();
+}
+
+StringRef ObjectOp::getClassName() { return getType().getName(); }
+
+ClassLike ObjectOp::getReferencedClass(const SymbolTable &symbolTable) {
+  auto symRef = getType().getNameAttr();
+  return symbolTable.lookup<ClassLike>(symRef.getLeafReference());
+}
+
+Operation *ObjectOp::getReferencedOperation(const SymbolTable &symtbl) {
+  return getReferencedClass(symtbl);
+}
+
+StringRef ObjectOp::getInstanceName() { return getName(); }
+
+StringAttr ObjectOp::getInstanceNameAttr() { return getNameAttr(); }
+
+StringRef ObjectOp::getReferencedModuleName() { return getClassName(); }
+
+StringAttr ObjectOp::getReferencedModuleNameAttr() {
+  return getClassNameAttr();
+}
+
+void ObjectOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
+  setNameFn(getResult(), getName());
 }
 
 //===----------------------------------------------------------------------===//
@@ -2822,7 +3133,7 @@ static LogicalResult checkConnectFlow(Operation *connect) {
     // A sink that is a port output or instance input used as a source is okay.
     auto kind = getDeclarationKind(src);
     if (kind != DeclKind::Port && kind != DeclKind::Instance) {
-      auto srcRef = getFieldRefFromValue(src);
+      auto srcRef = getFieldRefFromValue(src, /*lookThroughCasts=*/true);
       auto [srcName, rootKnown] = getFieldName(srcRef);
       auto diag = emitError(connect->getLoc());
       diag << "connect has invalid flow: the source expression ";
@@ -2835,7 +3146,7 @@ static LogicalResult checkConnectFlow(Operation *connect) {
 
   auto dstFlow = foldFlow(dst);
   if (!isValidDst(dstFlow)) {
-    auto dstRef = getFieldRefFromValue(dst);
+    auto dstRef = getFieldRefFromValue(dst, /*lookThroughCasts=*/true);
     auto [dstName, rootKnown] = getFieldName(dstRef);
     auto diag = emitError(connect->getLoc());
     diag << "connect has invalid flow: the destination expression ";
@@ -3261,12 +3572,20 @@ LogicalResult impl::inferReturnTypes(
   return failure();
 }
 
-/// Get an attribute by name from a list of named attributes. Aborts if the
-/// attribute does not exist.
-static Attribute getAttr(ArrayRef<NamedAttribute> attrs, StringRef name) {
+/// Get an attribute by name from a list of named attributes.  Return null if no
+/// attribute is found with that name.
+static Attribute maybeGetAttr(ArrayRef<NamedAttribute> attrs, StringRef name) {
   for (auto attr : attrs)
     if (attr.getName() == name)
       return attr.getValue();
+  return {};
+}
+
+/// Get an attribute by name from a list of named attributes. Aborts if the
+/// attribute does not exist.
+static Attribute getAttr(ArrayRef<NamedAttribute> attrs, StringRef name) {
+  if (auto attr = maybeGetAttr(attrs, name))
+    return attr;
   llvm::report_fatal_error("attribute '" + name + "' not found");
 }
 
@@ -3600,73 +3919,6 @@ LogicalResult ListCreateOp::verify() {
     return emitOpError("has elements of type ")
            << elementType << " instead of " << listElementType;
 
-  return success();
-}
-
-ParseResult MapCreateOp::parse(OpAsmParser &parser, OperationState &result) {
-  llvm::SmallVector<OpAsmParser::UnresolvedOperand, 16> keys;
-  llvm::SmallVector<OpAsmParser::UnresolvedOperand, 16> values;
-
-  MapType type;
-
-  auto parsePair = [&]() {
-    OpAsmParser::UnresolvedOperand key, value;
-    if (parser.parseOperand(key) || parser.parseArrow() ||
-        parser.parseOperand(value))
-      return failure();
-    keys.push_back(key);
-    values.push_back(value);
-    return success();
-  };
-  if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::OptionalParen,
-                                     parsePair) ||
-      parser.parseOptionalAttrDict(result.attributes) ||
-      parser.parseColonType(type))
-    return failure();
-  result.addTypes(type);
-
-  if (parser.resolveOperands(keys, type.getKeyType(), result.operands) ||
-      parser.resolveOperands(values, type.getValueType(), result.operands))
-    return failure();
-
-  return success();
-}
-
-void MapCreateOp::print(OpAsmPrinter &p) {
-  p << " ";
-  if (!getKeys().empty()) {
-    p << "(";
-    llvm::interleaveComma(llvm::zip_equal(getKeys(), getValues()), p,
-                          [&](auto pair) {
-                            auto &[key, value] = pair;
-                            p.printOperand(key);
-                            p << " -> ";
-                            p.printOperand(value);
-                          });
-    p << ")";
-  }
-  p.printOptionalAttrDict((*this)->getAttrs());
-  p << " : " << getType();
-}
-
-LogicalResult MapCreateOp::verify() {
-  if (getKeys().empty())
-    return success();
-
-  if (!llvm::all_equal(getKeys().getTypes()))
-    return emitOpError("has keys that are not all the same type");
-  if (!llvm::all_equal(getValues().getTypes()))
-    return emitOpError("has values that are not all the same type");
-
-  if (getKeys().front().getType() != getType().getKeyType())
-    return emitOpError("has unexpected key type ")
-           << getKeys().front().getType() << " instead of map key type "
-           << getType().getKeyType();
-
-  if (getValues().front().getType() != getType().getValueType())
-    return emitOpError("has unexpected value type ")
-           << getValues().front().getType() << " instead of map value type "
-           << getType().getValueType();
   return success();
 }
 
@@ -4886,7 +5138,7 @@ void VerbatimExprOp::getAsmResultNames(
   auto isOkCharacter = [](char c) { return llvm::isAlnum(c) || c == '_'; };
   auto name = getText();
   // Ignore a leading ` in macro name.
-  if (name.startswith("`"))
+  if (name.starts_with("`"))
     name = name.drop_front();
   name = name.take_while(isOkCharacter);
   if (!name.empty())
@@ -4905,7 +5157,7 @@ void VerbatimWireOp::getAsmResultNames(
   auto isOkCharacter = [](char c) { return llvm::isAlnum(c) || c == '_'; };
   auto name = getText();
   // Ignore a leading ` in macro name.
-  if (name.startswith("`"))
+  if (name.starts_with("`"))
     name = name.drop_front();
   name = name.take_while(isOkCharacter);
   if (!name.empty())
@@ -5094,6 +5346,22 @@ static ParseResult parseMemOp(OpAsmParser &parser, NamedAttrList &resultAttrs) {
 static void printMemOp(OpAsmPrinter &p, Operation *op, DictionaryAttr attr) {
   // "ruw" and "inner_sym" is always elided.
   printElidePortAnnotations(p, op, attr, {"ruw", "inner_sym"});
+}
+
+//===----------------------------------------------------------------------===//
+// ClassInterface custom directive
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseClassInterface(OpAsmParser &parser, Type &result) {
+  ClassType type;
+  if (ClassType::parseInterface(parser, type))
+    return failure();
+  result = type;
+  return success();
+}
+
+static void printClassInterface(OpAsmPrinter &p, Operation *, ClassType type) {
+  type.printInterface(p);
 }
 
 //===----------------------------------------------------------------------===//
@@ -5442,11 +5710,8 @@ LogicalResult RWProbeOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
 
   auto checkFinalType = [&](auto type, Location loc) -> LogicalResult {
     // Determine final type.
-    mlir::Type fType = type;
-    if (auto fieldIDType = type_dyn_cast<hw::FieldIDTypeInterface>(type))
-      fType = fieldIDType.getFinalTypeByFieldID(target.getField());
-    else
-      assert(target.getField() == 0);
+    mlir::Type fType =
+        hw::FieldIdImpl::getFinalTypeByFieldID(type, target.getField());
     // Check.
     auto baseType = type_dyn_cast<FIRRTLBaseType>(fType);
     if (!baseType || baseType.getPassiveType() != getType().getType()) {
@@ -5478,39 +5743,40 @@ LogicalResult RWProbeOp::verifyInnerRefs(hw::InnerRefNamespace &ns) {
 }
 
 //===----------------------------------------------------------------------===//
-// Optional Group Operations
+// Layer Block Operations
 //===----------------------------------------------------------------------===//
 
-LogicalResult GroupOp::verify() {
-  auto groupName = getGroupName();
+LogicalResult LayerBlockOp::verify() {
+  auto layerName = getLayerName();
   auto *parentOp = (*this)->getParentOp();
 
   // Verify the correctness of the symbol reference.  Only verify that this
-  // group makes sense in its parent module or group.
-  auto nestedReferences = groupName.getNestedReferences();
+  // layer block makes sense in its parent module or layer block.
+  auto nestedReferences = layerName.getNestedReferences();
   if (nestedReferences.empty()) {
     if (!isa<FModuleOp>(parentOp)) {
-      auto diag = emitOpError() << "has an un-nested group symbol, but does "
+      auto diag = emitOpError() << "has an un-nested layer symbol, but does "
                                    "not have a 'firrtl.module' op as a parent";
       return diag.attachNote(parentOp->getLoc())
              << "illegal parent op defined here";
     }
   } else {
-    auto parentGroup = dyn_cast<GroupOp>(parentOp);
-    if (!parentGroup) {
+    auto parentLayerBlock = dyn_cast<LayerBlockOp>(parentOp);
+    if (!parentLayerBlock) {
       auto diag = emitOpError()
-                  << "has a nested group symbol, but does not have a '"
+                  << "has a nested layer symbol, but does not have a '"
                   << getOperationName() << "' op as a parent'";
       return diag.attachNote(parentOp->getLoc())
              << "illegal parent op defined here";
     }
-    auto parentGroupName = parentGroup.getGroupName();
-    if (parentGroupName.getRootReference() != groupName.getRootReference() ||
-        parentGroupName.getNestedReferences() !=
-            groupName.getNestedReferences().drop_back()) {
-      auto diag = emitOpError() << "is nested under an illegal group";
-      return diag.attachNote(parentGroup->getLoc())
-             << "illegal parent group defined here";
+    auto parentLayerBlockName = parentLayerBlock.getLayerName();
+    if (parentLayerBlockName.getRootReference() !=
+            layerName.getRootReference() ||
+        parentLayerBlockName.getNestedReferences() !=
+            layerName.getNestedReferences().drop_back()) {
+      auto diag = emitOpError() << "is nested under an illegal layer block";
+      return diag.attachNote(parentLayerBlock->getLoc())
+             << "illegal parent layer block defined here";
     }
   }
 
@@ -5518,13 +5784,13 @@ LogicalResult GroupOp::verify() {
   Block *body = getBody(0);
   bool failed = false;
   body->walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
-    // Skip nested groups.  Those will be verified separately.
-    if (isa<GroupOp>(op))
+    // Skip nested layer blocks.  Those will be verified separately.
+    if (isa<LayerBlockOp>(op))
       return WalkResult::skip();
     // Check all the operands of each op to make sure that only legal things are
     // captured.
     for (auto operand : op->getOperands()) {
-      // Any value captured from the current group is fine.
+      // Any value captured from the current layer block is fine.
       if (operand.getParentBlock() == body)
         continue;
       // Capture of a non-base type, e.g., reference is illegal.
@@ -5547,15 +5813,15 @@ LogicalResult GroupOp::verify() {
         return WalkResult::advance();
       }
     }
-    // Ensure that the group does not drive any sinks.
+    // Ensure that the layer block does not drive any sinks.
     if (auto connect = dyn_cast<FConnectLike>(op)) {
       auto dest = getFieldRefFromValue(connect.getDest()).getValue();
       if (dest.getParentBlock() == body)
         return WalkResult::advance();
       auto diag = connect.emitOpError()
                   << "connects to a destination which is defined outside its "
-                     "enclosing group";
-      diag.attachNote(getLoc()) << "enclosing group is defined here";
+                     "enclosing layer block";
+      diag.attachNote(getLoc()) << "enclosing layer block is defined here";
       diag.attachNote(dest.getLoc()) << "destination is defined here";
       failed = true;
     }
@@ -5567,10 +5833,11 @@ LogicalResult GroupOp::verify() {
   return success();
 }
 
-LogicalResult GroupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto groupDeclOp = symbolTable.lookupNearestSymbolFrom<GroupDeclOp>(
-      *this, getGroupNameAttr());
-  if (!groupDeclOp) {
+LogicalResult
+LayerBlockOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto layerOp =
+      symbolTable.lookupNearestSymbolFrom<LayerOp>(*this, getLayerNameAttr());
+  if (!layerOp) {
     return emitOpError("invalid symbol reference");
   }
 

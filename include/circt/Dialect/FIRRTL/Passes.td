@@ -93,6 +93,24 @@ def LowerFIRRTLTypes : Pass<"firrtl-lower-types", "firrtl::CircuitOp"> {
   let dependentDialects = ["hw::HWDialect"];
 }
 
+def LowerSignatures : Pass<"firrtl-lower-signatures", "firrtl::CircuitOp"> {
+  let summary = "Lower FIRRTL module signatures";
+  let description = [{
+    Lower aggregate FIRRTL types in Modules as indicated by the calling
+    convention.
+  }];
+  let constructor = "circt::firrtl::createLowerSignaturesPass()";
+}
+
+def PassiveWires : Pass<"firrtl-passive-wires", "firrtl::FModuleOp"> {
+  let summary = "Make FIRRTL wires have passive type";
+  let description = [{
+    Eliminate flips from aggregate types on wires.
+  }];
+  let constructor = "circt::firrtl::createPassiveWiresPass()";
+}
+
+
 def IMConstProp : Pass<"firrtl-imconstprop", "firrtl::CircuitOp"> {
   let summary = "Intermodule constant propagation and dead code elimination";
   let description = [{
@@ -275,7 +293,7 @@ def LowerMatches : Pass<"firrtl-lower-matches", "firrtl::FModuleOp"> {
   let constructor = "circt::firrtl::createLowerMatchesPass()";
 }
 
-def ExpandWhens : Pass<"firrtl-expand-whens", "firrtl::FModuleOp"> {
+def ExpandWhens : InterfacePass<"firrtl-expand-whens", "firrtl::FModuleLike"> {
   let summary = "Remove all when conditional blocks.";
   let description = [{
     This pass will:
@@ -463,8 +481,17 @@ def GrandCentral : Pass<"firrtl-grand-central", "CircuitOp"> {
   let constructor = "circt::firrtl::createGrandCentralPass()";
   let dependentDialects = ["circt::sv::SVDialect", "circt::hw::HWDialect"];
   let options = [
-    Option<"instantiateCompanionOnly", "instantiate-companion-only", "bool", "false",
-      "Instantiate the companion without a bind and drop the interface">
+    Option<"companionMode", "companion-mode", "CompanionMode",
+           "CompanionMode::Bind",
+           "specify the handling of companion modules", [{
+            ::llvm::cl::values(
+              clEnumValN(CompanionMode::Bind, "bind",
+                "Lower companion instances to SystemVerilog binds"),
+              clEnumValN(CompanionMode::Instantiate, "instantiate",
+                "Instantiate companions in the design"),
+              clEnumValN(CompanionMode::Drop, "drop",
+                "Remove companions from the design"))
+           }]>
   ];
   let statistics = [
     Statistic<"numViews", "num-views-created",
@@ -590,8 +617,10 @@ def DropName : Pass<"firrtl-drop-names", "firrtl::FModuleOp"> {
            "PreserveValues::None",
            "specify the values which can be optimized away", [{
             ::llvm::cl::values(
+              clEnumValN(PreserveValues::Strip, "strip",
+                "Strip all names. No name is preserved"),
               clEnumValN(PreserveValues::None, "none",
-                "Preserve no values"),
+                "Preserve no named values. Names could be preserved by best-effort unlike `strip`"),
               clEnumValN(PreserveValues::Named, "named",
                 "Preserve values with meaningful names"),
               clEnumValN(PreserveValues::All, "all",
@@ -637,6 +666,10 @@ def LowerIntrinsics : Pass<"firrtl-lower-intrinsics", "firrtl::CircuitOp"> {
     intmodule to their implementation or op.
   }];
   let constructor = "circt::firrtl::createLowerIntrinsicsPass()";
+  let options = [
+    Option<"fixupEICGWrapper", "fixup-eicg-wrapper", "bool", "false",
+      "Lower `EICG_wrapper` modules into clock gate intrinsics">,
+  ];
 }
 
 def LowerOpenAggs : Pass<"firrtl-lower-open-aggs", "firrtl::CircuitOp"> {
@@ -726,15 +759,115 @@ def LowerClasses : Pass<"firrtl-lower-classes", "firrtl::CircuitOp"> {
   let dependentDialects = ["om::OMDialect"];
 }
 
-def LowerGroups : Pass<"firrtl-lower-groups", "firrtl::CircuitOp"> {
-  let summary = "Lower optional groups to instances";
+def LowerLayers : Pass<"firrtl-lower-layers", "firrtl::CircuitOp"> {
+  let summary = "Lower layers and layer blocks to instances";
   let description = [{
-    This pass converts FIRRTL optional groups to new modules and instantiations.
-    Referenced SSA values captured by a group are converted to ports of the
-    created module.
+    This pass lowers FIRRTL layers as defined by their convention.  After this
+    pass, all layer blocks and layers are removed.
   }];
-  let constructor = "circt::firrtl::createLowerGroupsPass()";
+  let constructor = "circt::firrtl::createLowerLayersPass()";
   let dependentDialects = ["sv::SVDialect"];
+}
+
+def LayerMerge : Pass<"firrtl-layer-merge", "firrtl::FModuleOp"> {
+  let summary = "Merge layer blocks";
+  let description = [{
+    Combine all layer blocks in a module which reference the same layer
+    definition.
+  }];
+  let constructor = "::circt::firrtl::createLayerMergePass()";
+  let statistics = [
+    Statistic<"numMerged", "num-merged", "Number of layers merged">,
+  ];
+}
+
+def LayerSink : Pass<"firrtl-layer-sink", "firrtl::FModuleOp"> {
+  let summary = "Sink operations into layer blocks";
+  let description = [{
+
+  }];
+  let constructor = "::circt::firrtl::createLayerSinkPass()";
+  let statistics = [
+    Statistic<"numSunk", "num-sunk", "Number of operations sunk">,
+  ];
+}
+
+def HoistPassthrough : Pass<"firrtl-hoist-passthrough", "firrtl::CircuitOp"> {
+  let summary = "Hoist passthrough logic";
+  let description = [{
+    This pass hoists simple passthrough connections up.
+  }];
+  let constructor = "circt::firrtl::createHoistPassthroughPass()";
+  let options = [
+    Option<"hoistHWDrivers", "hoist-hw", "bool", "true",
+      "Hoist HW drivers.">
+  ];
+  let statistics = [
+    Statistic<"numUTurnsHoisted", "num-u-turns",
+      "Number of u-turns hoisted">,
+    Statistic<"numRefDrivers", "num-ref-drivers",
+      "Number of ref-type drivers processed">,
+    Statistic<"numHWDrivers", "num-hw-drivers",
+      "Number of hw-type drivers processed">
+  ];
+}
+
+def ProbeDCE : Pass<"firrtl-probe-dce", "firrtl::CircuitOp"> {
+  let summary = "Delete dead probe ports and operations.";
+  let description = [{
+    Simple pass to delete dead probe ports and operations.
+    Diagnoses illegal or unsupported input probe uses.
+    Post-condition: no input probe ports.
+  }];
+  let constructor = "circt::firrtl::createProbeDCEPass()";
+  let statistics = [
+    Statistic<"numErasedPorts", "num-erased-ports", "Number of ports erased">,
+    Statistic<"numErasedOps", "num-erased-ops", "Number of operations erased">
+  ];
+}
+
+def MaterializeDebugInfo :
+    Pass<"firrtl-materialize-debug-info", "firrtl::FModuleOp"> {
+  let summary = "Generate debug ops to track FIRRTL values";
+  let description = [{
+    This pass creates debug ops to track FIRRTL-level ports, nodes, wires,
+    registers, and instances throughout the pipeline. The `DebugInfo` analysis
+    can then be used at a later point in the pipeline to obtain a source
+    language view into the lowered IR.
+  }];
+  let constructor = "circt::firrtl::createMaterializeDebugInfoPass()";
+  let dependentDialects = ["debug::DebugDialect"];
+}
+
+def Lint :
+    Pass<"firrtl-lint", "firrtl::FModuleOp"> {
+  let summary = "An analysis pass to detect static simulation failures.";
+  let description = [{
+    This pass detects operations that will trivially fail any simulation.
+    Currently it detects assertions whose predicate condition can be statically
+    inferred to be false. The pass emits error on such failing ops.
+  }];
+  let constructor = "circt::firrtl::createLintingPass()";
+}
+
+def SpecializeOption :
+    Pass<"firrtl-specialize-option", "firrtl::CircuitOp"> {
+  let summary = "Specialize a configurable design for a given option.";
+  let description = [{
+    If the design has option groups, instead of preserving the information
+    up to the emitted SystemVerilog, this pass specializes it early on for a
+    given choice.
+  }];
+  let constructor = "circt::firrtl::createSpecializeOptionPass()";
+
+  let options = [
+    ListOption<"select", "select", "std::string", 
+               "Options to specialize, in option=case format">,
+  ];
+  let statistics = [
+    Statistic<"numInstances", "num-instances",
+      "Number of instances specialized">
+  ];
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_PASSES_TD

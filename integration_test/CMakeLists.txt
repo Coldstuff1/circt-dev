@@ -7,8 +7,10 @@ set(CIRCT_INTEGRATION_TEST_DEPENDS
   circt-opt
   circt-translate
   circt-rtl-sim
+  esi-collateral
   firtool
   hlstool
+  ibistool
   handshake-runner
   )
 
@@ -23,6 +25,17 @@ if (TARGET EsiCosimDpiServer)
   list(APPEND CIRCT_INTEGRATION_TEST_DEPENDS esi-cosim-runner)
   get_property(ESI_COSIM_LIB_DIR TARGET EsiCosimDpiServer PROPERTY LIBRARY_OUTPUT_DIRECTORY)
   set(ESI_COSIM_PATH ${ESI_COSIM_LIB_DIR}/libEsiCosimDpiServer.so)
+endif()
+get_target_property(ESI_COLLATERAL_PATH esi-collateral BINARY_DIR)
+
+# If the ESI runtime build and test is enabled, require those components.
+llvm_canonicalize_cmake_booleans(ESI_RUNTIME)
+if (ESI_RUNTIME)
+  list(APPEND CIRCT_INTEGRATION_TEST_DEPENDS
+    ESIRuntime
+    ESIPythonRuntime
+    esiquery
+  )
 endif()
 
 # Enable circt-lec tests if it is built.

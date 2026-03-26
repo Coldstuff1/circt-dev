@@ -1,4 +1,4 @@
-; RUN: firtool --split-input-file %s | FileCheck %s
+; RUN: firtool --no-dedup --split-input-file %s | FileCheck %s
 
 ; A number of tests use an invalidated wire with a DontTouchAnnotation to block
 ; constant sinking into the XMR.  This is to ensure that the test can check a
@@ -246,11 +246,13 @@ circuit TestHarness : %[[
 ; CHECK:       module Top(
 ; CHECK-NOT:   endmodule
 ; CHECK:         Companion Companion (
+; CHECK-NEXT:    .io (io),
 ; CHECK-NEXT:    .[[bore:[a-zA-Z0-9_]+]] (Top.test.signal_probe)
 ; CHECK:       endmodule
 
 ; CHECK:       module Companion(
 ; CHECK-NOT:   endmodule
+; CHECK-NEXT:    output io,
 ; CHECK-NEXT:    input [7:0] [[bore]]
 ; CHECK:         io = [[bore]][0];
 ; CHECK:       endmodule

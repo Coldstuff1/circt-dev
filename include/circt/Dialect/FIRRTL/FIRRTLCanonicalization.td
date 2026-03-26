@@ -504,12 +504,13 @@ def BitsOfPad : Pat<
   (AsUIntPrimOp $x),
   [(KnownWidth $x), (EqualIntSize $old, $x), (AttrIsZero $oLow)]>;
 
+def IndexInBound : Constraint<CPred<"cast<IntegerAttr>($0).getAPSInt().getExtValue() < static_cast<int64_t>(type_cast<FVectorType>($1.getType()).getNumElements())">>;
+
 // subaccess a, cst -> subindex a, cst
-// TODO: only enable if cst is inside a.  Subaccess and subindex behave differently for out-of-bounds indexes.
 def SubaccessOfConstant : Pat<
   (SubaccessOp:$old $array, (ConstantOp $cst)),
   (MoveNameHint $old, (SubindexOp $array, (NativeCodeCall<"$_builder.getI32IntegerAttr(cast<IntegerAttr>($0).getAPSInt().getExtValue())"> $cst))),
-  []>;
+  [(IndexInBound $cst, $array)]>;
 
 // mux(cond, 0, 1) -> ~cond
 def MuxNot : Pat<
@@ -542,6 +543,24 @@ def NarrowMuxRHS : Pat <
   (MuxPrimOp:$old $cond, (CatPrimOp:$lhs $a, $b), (CatPrimOp:$rhs $c, $b)),
   (MoveNameHint $old, (CatPrimOp (MuxPrimOp $cond, $a, $c), $b)),
   [(EqualTypes $lhs, $rhs), (KnownWidth $lhs)]>;
+
+// mux(eq(a, b), a, b) -> b
+def MuxEQOperands : Pat<
+  (MuxPrimOp (EQPrimOp $a, $b), $a, $b),
+  (replaceWithValue $b),
+  [(EqualTypes $a, $b), (KnownWidth $a)]>;
+
+// mux(eq(b, a), a, b) -> b
+def MuxEQOperandsSwapped : Pat<
+  (MuxPrimOp (EQPrimOp $b, $a), $a, $b),
+  (replaceWithValue $b),
+  [(EqualTypes $a, $b), (KnownWidth $a)]>;
+
+// mux(neq(a, b), x, y) -> mux(eq(a, b), y, x)
+def MuxNEQ : Pat<
+  (MuxPrimOp:$old (NEQPrimOp $a, $b), $x, $y),
+  (MoveNameHint $old, (MuxPrimOp (EQPrimOp $a, $b), $y, $x)),
+  [(EqualTypes $x, $y), (KnownWidth $x)]>;
 
 def CatDoubleConst : Pat <
   (CatPrimOp:$old $cst1, (CatPrimOp $cst2, $v)),

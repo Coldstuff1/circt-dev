@@ -76,31 +76,42 @@ def SymbolRefType : TypeDef<OMDialect, "SymbolRef", []> {
   let mnemonic = "sym_ref";
 }
 
+def OMIntegerType : TypeDef<OMDialect, "OMInteger", []> {
+  let summary = "A type that represents an arbitrary width integer.";
+
+  let mnemonic = "integer";
+}
+
 def StringType : TypeDef<OMDialect, "String", []> {
   let summary = "A type that represents a string.";
 
   let mnemonic = "string";
 }
 
+def BasePathType : TypeDef<OMDialect, "BasePath", []> {
+  let summary = "A fragment of a path to a hardware component";
+  let mnemonic = "basepath";
+}
+
 def PathType : TypeDef<OMDialect, "Path", []> {
   let summary = "A path to a hardware component";
-
   let mnemonic = "path";
 }
 
-def EnumType : TypeDef<OMDialect, "Enum", []> {
-  let summary = "An enum type";
+def FrozenBasePathType : TypeDef<OMDialect, "FrozenBasePath", []> {
+  let summary = "A frozen fragment of a path to a hardware component";
+  let mnemonic = "frozenbasepath";
+}
 
-  let mnemonic = "enum";
-  let parameters = (
-    ins ArrayRefParameter<
-      "::circt::om::EnumType::EnumElement", 
-      "enum fields">: $elements
-  );
-  let hasCustomAssemblyFormat = 1;
-  let extraClassDeclaration = [{
-    using EnumElement = ::circt::om::detail::EnumElement;
-  }];
+def FrozenPathType : TypeDef<OMDialect, "FrozenPath", []> {
+  let summary = "A frozen path to a hardware component";
+  let mnemonic = "frozenpath";
+}
+
+def OMAnyType : TypeDef<OMDialect, "Any", []> {
+  let summary = "A type that represents any valid OM type.";
+
+  let mnemonic = "any";
 }
 
 #endif // CIRCT_DIALECT_OM_OMTYPES_TD

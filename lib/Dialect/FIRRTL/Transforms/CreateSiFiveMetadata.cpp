@@ -315,12 +315,12 @@ CreateSiFiveMetadataPass::emitMemoryMetadata(ObjectModelIR &omir) {
         for (auto p : paths) {
           if (p.empty())
             continue;
-          auto top = p.front();
+          auto top = p.top();
           std::string hierName =
               addSymbolToVerbatimOp(top->getParentOfType<FModuleOp>(),
                                     jsonSymbols)
                   .c_str();
-          auto finalInst = p.back();
+          auto finalInst = p.leaf();
           for (auto inst : llvm::drop_end(p)) {
             auto parentModule = inst->getParentOfType<FModuleOp>();
             if (dutMod == parentModule)
@@ -338,8 +338,10 @@ CreateSiFiveMetadataPass::emitMemoryMetadata(ObjectModelIR &omir) {
           // the DUT is the top module or when no DUT is specified.
           if (everythingInDUT ||
               llvm::any_of(p, [&](circt::igraph::InstanceOpInterface inst) {
-                return inst.getReferencedModuleNameAttr() ==
-                       dutMod.getNameAttr();
+                return llvm::all_of(inst.getReferencedModuleNamesAttr(),
+                                    [&](Attribute attr) {
+                                      return attr == dutMod.getNameAttr();
+                                    });
               }))
             jsonStream.value(hierName);
         }

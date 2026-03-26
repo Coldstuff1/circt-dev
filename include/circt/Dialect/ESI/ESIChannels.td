@@ -15,9 +15,11 @@
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/EnumAttr.td"
+include "mlir/IR/OpAsmInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 
 include "circt/Dialect/HW/HWTypes.td"
+include "circt/Dialect/Seq/SeqTypes.td"
 
 include "circt/Dialect/ESI/ESIDialect.td"
 include "circt/Dialect/ESI/ESIInterfaces.td"
@@ -64,7 +66,7 @@ def ChannelTypeImpl : ESI_Type<"Channel"> {
         "::circt::esi::ChannelSignaling::ValidReady">:$signaling);
 
   let assemblyFormat = "`<` $inner (`,` $signaling^)? `>`";
- 
+
   let builders = [
     TypeBuilder<(ins "Type":$type), [{
         return Base::get(type.getContext(), type,
@@ -198,6 +200,114 @@ def UnwrapSVInterfaceOp : ESI_Op<"unwrap.iface", [
 }
 
 //===----------------------------------------------------------------------===//
+// Channel bundles
+//===----------------------------------------------------------------------===//
+
+// Used to indicate the presence of a keyword in asm. Should be used within
+// optional parens in the declarative assembly format.
+// Upstreaming: https://github.com/llvm/llvm-project/pull/65438
+def UnitParameter : AttrOrTypeParameter<"::mlir::UnitAttr", "boolean flag"> {
+  let printer = "";
+  let parser = "::mlir::UnitAttr::get($_parser.getContext())";
+  let defaultValue = "::mlir::UnitAttr()";
+}
+
+def ChannelDirection : I32EnumAttr<"ChannelDirection",
+  "Direction of channel (see ChannelBundleImpl for details)", [
+    I32EnumAttrCase<"to", 1>,
+    I32EnumAttrCase<"from", 2>,
+  ]> {
+  let cppNamespace = "::circt::esi";
+}
+
+
+def ChannelBundleType : ESI_Type<"ChannelBundle"> {
+  let summary = "a bundle of channels";
+
+  let description = [{
+    A channel bundle (sometimes referred to as just "bundle") is a set of
+    channels of associated signals, along with per-channel names and directions.
+    The prototypical example for a bundle is a request-response channel pair.
+
+    The direction terminology is a bit confusing. Let us designate the module
+    which is outputting the bundle as the "sender" module and a module which has
+    a bundle as an input as the "receiver". The directions "from" and "to" are
+    from the senders perspective. So, the "to" direction means that channel is
+    transmitting messages from the sender to the receiver. Then, "from" means
+    that the sender is getting messages from the receiver (typically responses).
+
+    When requesting a bundle from a service, the client is always considered the
+    sender. So the "to" direction is for the client to send messages to the
+    service.
+  }];
+
+  let mnemonic = "bundle";
+  let parameters = (ins ArrayRefParameter<"BundledChannel">:$channels,
+                        UnitParameter:$resettable);
+  let assemblyFormat = [{
+    `<` `[` $channels `]` (`reset` $resettable^)? `>`
+  }];
+
+  let extraClassDeclaration = [{
+    // Get a channel bundle with the same types and names but the directions
+    // reversed.
+    ChannelBundleType getReversed() const;
+
+    // Return the opposite direction.
+    static ChannelDirection flip(ChannelDirection dir) {
+      return dir == ChannelDirection::from
+                               ? ChannelDirection::to
+                               : ChannelDirection::from;
+    }
+  }];
+}
+
+def PackBundleOp : ESI_Op<"bundle.pack", [
+      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+    ]> {
+  let summary = "pack channels into a bundle";
+
+  let arguments = (ins Variadic<ChannelType>:$toChannels);
+  let results =  (outs ChannelBundleType:$bundle,
+                       Variadic<ChannelType>:$fromChannels);
+  let assemblyFormat = [{
+    $toChannels attr-dict `:` custom<UnPackBundleType>(
+      type($toChannels), type($fromChannels), type($bundle))
+  }];
+
+  let hasVerifier = 1;
+  let hasCanonicalizeMethod = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "ChannelBundleType":$bundleType,
+                   "mlir::ValueRange":$toChannels)>
+  ];
+}
+
+def UnpackBundleOp : ESI_Op<"bundle.unpack", [
+      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+    ]> {
+  let summary = "unpack channels from a bundle";
+
+  let arguments = (ins ChannelBundleType:$bundle,
+                       Variadic<ChannelType>:$fromChannels);
+  let results =  (outs Variadic<ChannelType>:$toChannels);
+  let assemblyFormat = [{
+    $fromChannels `from` $bundle attr-dict `:` custom<UnPackBundleType>(
+      type($toChannels), type($fromChannels), type($bundle))
+  }];
+
+  let hasVerifier = 1;
+  let hasCanonicalizeMethod = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$bundle, "mlir::ValueRange":$fromChannels)>
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // Data windows
 //===----------------------------------------------------------------------===//
 
@@ -328,7 +438,7 @@ def ChannelBufferOp : ESI_Abstract_Op<"buffer", [
     ```
   }];
 
-  let arguments = (ins I1:$clk, I1:$rst, ChannelType:$input,
+  let arguments = (ins ClockType:$clk, I1:$rst, ChannelType:$input,
     OptionalAttr<ConfinedAttr<I64Attr, [IntMinValue<1>]>>:$stages,
     OptionalAttr<StrAttr>:$name);
   let results = (outs ChannelType:$output);
@@ -347,7 +457,7 @@ def PipelineStageOp : ESI_Physical_Op<"stage", [
     late-pass latency balancing.
   }];
 
-  let arguments = (ins I1:$clk, I1:$rst, ChannelType:$input);
+  let arguments = (ins ClockType:$clk, I1:$rst, ChannelType:$input);
   let results = (outs ChannelType:$output);
   let hasCustomAssemblyFormat = 1;
 }
@@ -356,58 +466,45 @@ def PipelineStageOp : ESI_Physical_Op<"stage", [
 // Misc operations
 //===----------------------------------------------------------------------===//
 
-def CosimEndpointOp : ESI_Physical_Op<"cosim", []> {
-  let summary = "Co-simulation endpoint";
+def CosimToHostEndpointOp : ESI_Physical_Op<"cosim.to_host", []> {
+  let summary = "Co-simulation endpoint sending data to the host.";
   let description = [{
     A co-simulation endpoint is a connection from the simulation to some
     outside process, usually a software application responsible for driving
     the simulation (driver).
 
-    ESI uses a serialization protocol called Cap'n Proto (capnp for short).
-    The advantage of capnp is the decoding overhead: for value types (ints,
-    structs, etc.) there is none! This stands in contrast to Protocol Buffers
-    and Bond as their messages contain metadata for each field which must be
-    interpreted.
+    It is uni-directional, in this case sending data from the simulation to the
+    host.
 
-    The advantage of using a well-supported serialization protocol is
-    language support -- driver applications can be written in any language
-    supported by the specific protocol.
+    NOTE: $id MUST be unique across all endpoints at simulation runtime.
   }];
 
-  let arguments = (ins I1:$clk, I1:$rst, ChannelType:$send, StrAttr:$name);
-  let results = (outs ChannelType:$recv);
+  let arguments = (ins ClockType:$clk, I1:$rst,
+                       ChannelType:$toHost, StrAttr:$id);
 
   let assemblyFormat = [{
-    $clk `,` $rst `,` $send `,` $name attr-dict
-      `:` qualified(type($send)) `->` qualified(type($recv))
+    $clk `,` $rst `,` $toHost`,` $id attr-dict `:` qualified(type($toHost))
   }];
 }
 
-def RtlBitArrayType : Type<CPred<"$_self.isa<::circt::hw::ArrayType>()"
- " && $_self.cast<::circt::hw::ArrayType>().getElementType() =="
- "   ::mlir::IntegerType::get($_self.getContext(), 1)">, "an HW bit array">;
+def CosimFromHostEndpointOp : ESI_Physical_Op<"cosim.from_host", []> {
+  let summary = "Co-simulation endpoint receiving data from the host";
+  let description = [{
+    A co-simulation endpoint is a connection from the simulation to some
+    outside process, usually a software application responsible for driving
+    the simulation (driver).
 
-def CapnpDecodeOp : ESI_Physical_Op<"decode.capnp", [Pure]> {
-  let summary = "Translate bits in Cap'nProto messages to HW typed data";
+    It is uni-directional, in this case receiving data from the host for the
+    simulation.
 
-  let arguments = (ins I1:$clk, I1:$valid, RtlBitArrayType:$capnpBits);
-  let results = (outs AnyType:$decodedData);
-
-  let assemblyFormat = [{
-    $clk $valid $capnpBits attr-dict `:` qualified(type($capnpBits)) `->`
-                                         qualified(type($decodedData))
+    NOTE: $id MUST be unique across all endpoints at simulation runtime.
   }];
-}
 
-def CapnpEncodeOp : ESI_Physical_Op<"encode.capnp", [Pure]> {
-  let summary = "Translate HW typed data to Cap'nProto";
-
-  let arguments = (ins I1:$clk, I1:$valid, AnyType:$dataToEncode);
-  let results = (outs RtlBitArrayType:$capnpBits);
+  let arguments = (ins ClockType:$clk, I1:$rst, StrAttr:$id);
+  let results = (outs ChannelType:$fromHost);
 
   let assemblyFormat = [{
-    $clk $valid $dataToEncode attr-dict `:` qualified(type($dataToEncode))
-                                          `->` qualified(type($capnpBits))
+    $clk `,` $rst `,` $id attr-dict `:` qualified(type($fromHost))
   }];
 }
 
@@ -418,6 +515,13 @@ def NullSourceOp : ESI_Physical_Op<"null", [Pure]> {
   let results = (outs ChannelType:$out);
 
   let assemblyFormat = [{ attr-dict `:` qualified(type($out)) }];
+}
+
+def SinkChannelAttr : AttrDef<ESI_Dialect, "NullChannel"> {
+  let summary = "An attribute which indicates a channel is unconnected.";
+  let mnemonic = "null";
+  let parameters = (ins "TypeAttr":$type);
+  let assemblyFormat = [{ $type }];
 }
 
 #endif // CIRCT_DIALECT_ESI_CHANNELS_TD

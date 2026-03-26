@@ -22,8 +22,10 @@
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Dialect/Seq/SeqDialect.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Support/Namespace.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/SetVector.h"
 
 #include <set>
 
@@ -38,47 +40,48 @@ using BindTable = DenseMap<StringAttr, SmallDenseMap<StringAttr, sv::BindOp>>;
 //===----------------------------------------------------------------------===//
 
 // Reimplemented from SliceAnalysis to use a worklist rather than recursion and
-// non-insert ordered set.
+// non-insert ordered set.  Implement this as a DFS and not a BFS so that the
+// order is stable across changes to intermediary operations.  (It is then
+// necessary to use the _operands_ as a worklist and not the _operations_.)
 static void
 getBackwardSliceSimple(Operation *rootOp, SetVector<Operation *> &backwardSlice,
                        llvm::function_ref<bool(Operation *)> filter) {
-  SmallVector<Operation *> worklist;
-  worklist.push_back(rootOp);
+  SmallVector<Value> worklist(rootOp->getOperands());
 
   while (!worklist.empty()) {
-    Operation *op = worklist.back();
-    worklist.pop_back();
+    Value operand = worklist.pop_back_val();
+    Operation *definingOp = operand.getDefiningOp();
 
-    if (!op || op->hasTrait<mlir::OpTrait::IsIsolatedFromAbove>())
+    if (!definingOp ||
+        definingOp->hasTrait<mlir::OpTrait::IsIsolatedFromAbove>())
       continue;
 
     // Evaluate whether we should keep this def.
     // This is useful in particular to implement scoping; i.e. return the
     // transitive backwardSlice in the current scope.
-    if (filter && !filter(op))
+    if (filter && !filter(definingOp))
       continue;
 
-    for (auto en : llvm::enumerate(op->getOperands())) {
-      auto operand = en.value();
-      if (auto *definingOp = operand.getDefiningOp()) {
-        if (!backwardSlice.contains(definingOp))
-          worklist.push_back(definingOp);
-      } else if (auto blockArg = operand.dyn_cast<BlockArgument>()) {
-        Block *block = blockArg.getOwner();
-        Operation *parentOp = block->getParentOp();
-        // TODO: determine whether we want to recurse backward into the other
-        // blocks of parentOp, which are not technically backward unless they
-        // flow into us. For now, just bail.
-        assert(parentOp->getNumRegions() == 1 &&
-               parentOp->getRegion(0).getBlocks().size() == 1);
-        if (!backwardSlice.contains(parentOp))
-          worklist.push_back(parentOp);
-      } else {
-        llvm_unreachable("No definingOp and not a block argument.");
-      }
+    if (definingOp) {
+      if (!backwardSlice.contains(definingOp))
+        for (auto newOperand : llvm::reverse(definingOp->getOperands()))
+          worklist.push_back(newOperand);
+    } else if (auto blockArg = operand.dyn_cast<BlockArgument>()) {
+      Block *block = blockArg.getOwner();
+      Operation *parentOp = block->getParentOp();
+      // TODO: determine whether we want to recurse backward into the other
+      // blocks of parentOp, which are not technically backward unless they
+      // flow into us. For now, just bail.
+      assert(parentOp->getNumRegions() == 1 &&
+             parentOp->getRegion(0).getBlocks().size() == 1);
+      if (!backwardSlice.contains(parentOp))
+        for (auto newOperand : llvm::reverse(parentOp->getOperands()))
+          worklist.push_back(newOperand);
+    } else {
+      llvm_unreachable("No definingOp and not a block argument.");
     }
 
-    backwardSlice.insert(op);
+    backwardSlice.insert(definingOp);
   }
 }
 
@@ -201,12 +204,15 @@ static hw::HWModuleOp createModuleForCut(hw::HWModuleOp op,
   // Construct the ports, this is just the input Values
   SmallVector<hw::PortInfo> ports;
   {
+    Namespace portNames;
     auto srcPorts = op.getInputNames();
     for (auto port : llvm::enumerate(realInputs)) {
-      auto name = getNameForPort(port.value(), srcPorts);
-      ports.push_back(
-          {{name, port.value().getType(), hw::ModulePort::Direction::Input},
-           port.index()});
+      auto name = getNameForPort(port.value(), srcPorts).getValue();
+      name = portNames.newName(name.empty() ? "port_" + Twine(port.index())
+                                            : name);
+      ports.push_back({{b.getStringAttr(name), port.value().getType(),
+                        hw::ModulePort::Direction::Input},
+                       port.index()});
     }
   }
 
@@ -217,6 +223,7 @@ static hw::HWModuleOp createModuleForCut(hw::HWModuleOp op,
   if (path)
     newMod->setAttr("output_file", path);
   newMod.setCommentAttr(b.getStringAttr("VCS coverage exclude_file"));
+  newMod.setPrivate();
 
   // Update the mapping from old values to cloned values
   for (auto port : llvm::enumerate(realInputs)) {
@@ -348,8 +355,9 @@ inlineInputOnly(hw::HWModuleOp oldMod, hw::InstanceGraph &instanceGraph,
   // declaration with an inner symbol referred by non-bind ops (e.g. hierpath).
   auto oldModName = oldMod.getModuleNameAttr();
   for (auto port : oldMod.getPortList()) {
-    if (port.sym) {
-      for (auto property : port.sym) {
+    auto sym = port.getSym();
+    if (sym) {
+      for (auto property : sym) {
         auto innerRef = hw::InnerRefAttr::get(oldModName, property.getName());
         if (innerRefUsedByNonBindOp.count(innerRef)) {
           oldMod.emitWarning() << "module " << oldMod.getModuleName()
@@ -533,10 +541,10 @@ static bool isAssertOp(hw::HWSymbolCache &symCache, Operation *op) {
   // verifications. See FIRParserAsserts for more details.
   if (auto error = dyn_cast<ErrorOp>(op)) {
     if (auto message = error.getMessage())
-      return message->startswith("assert:") ||
-             message->startswith("assert failed (verification library)") ||
-             message->startswith("Assertion failed") ||
-             message->startswith("assertNotX:") ||
+      return message->starts_with("assert:") ||
+             message->starts_with("assert failed (verification library)") ||
+             message->starts_with("Assertion failed") ||
+             message->starts_with("assertNotX:") ||
              message->contains("[verif-library-assert]");
     return false;
   }

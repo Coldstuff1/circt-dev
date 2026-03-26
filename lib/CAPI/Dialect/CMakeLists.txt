@@ -1,20 +1,22 @@
 # TODO: Make the check source feature optional as an argument on *_add_library.
 set(LLVM_OPTIONAL_SOURCES
+  CHIRRTL.cpp
   Comb.cpp
-  HIR.cpp
+  Debug.cpp
   ESI.cpp
   FIRRTL.cpp
-  CHIRRTL.cpp
-  MSFT.cpp
+  FSM.cpp
   HW.cpp
   HWArith.cpp
+  Handshake.cpp
   LLHD.cpp
+  LTL.cpp
+  MSFT.cpp
   Moore.cpp
   OM.cpp
-  Seq.cpp
   SV.cpp
-  FSM.cpp
-  Handshake.cpp
+  Seq.cpp
+  Verif.cpp
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIComb
@@ -23,6 +25,14 @@ add_mlir_public_c_api_library(CIRCTCAPIComb
   LINK_LIBS PUBLIC
   MLIRCAPIIR
   CIRCTComb
+)
+
+add_mlir_public_c_api_library(CIRCTCAPIDebug
+  Debug.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTDebug
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIESI
@@ -60,14 +70,6 @@ add_mlir_public_c_api_library(CIRCTCAPIMSFT
   MLIRTransforms
   CIRCTMSFT
   CIRCTMSFTTransforms
-)
-
-add_mlir_public_c_api_library(CIRCTCAPIHIR
-  HIR.cpp
-
-  LINK_LIBS PUBLIC
-  MLIRCAPIIR
-  CIRCTHIR
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIHW
@@ -124,6 +126,9 @@ add_mlir_public_c_api_library(CIRCTCAPISV
 add_mlir_public_c_api_library(CIRCTCAPIFSM
   FSM.cpp
 
+  DEPENDS
+  CIRCTConversionPassIncGen
+
   LINK_LIBS PUBLIC
   MLIRCAPIIR
   CIRCTFSM
@@ -149,4 +154,21 @@ add_mlir_public_c_api_library(CIRCTCAPIHWArith
   MLIRCAPIIR
   CIRCTHWArith
   CIRCTHWArithToHW
+)
+
+add_mlir_public_c_api_library(CIRCTCAPIVerif
+  Verif.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTVerif
+  CIRCTVerifToSV
+)
+
+add_mlir_public_c_api_library(CIRCTCAPILTL
+  LTL.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTLTL
 )

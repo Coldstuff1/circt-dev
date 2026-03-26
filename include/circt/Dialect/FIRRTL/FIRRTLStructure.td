@@ -51,10 +51,6 @@ def CircuitOp : FIRRTLOp<"circuit",
 
     /// Return body of this circuit.
     Block *getBodyBlock();
-
-    // Return the main module that is the entry point of the circuit.  This may
-    // be either an FModuleOp or an FExtModuleOp.  A SymbolTable is optional.
-    FModuleLike getMainModule(mlir::SymbolTable* symtbl = nullptr);
   }];
 
   let assemblyFormat = "$name `` custom<CircuitOpAttrs>(attr-dict) $body";
@@ -66,7 +62,6 @@ class FIRRTLModuleLike<string mnemonic, list<Trait> traits = []> :
     IsolatedFromAbove, Symbol, HasParent<"CircuitOp">,
     DeclareOpInterfaceMethods<FModuleLike>,
     DeclareOpInterfaceMethods<PortList>,
-    DeclareOpInterfaceMethods<SymboledPortList>,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>,
     OpAsmOpInterface, InnerSymbolTable]> {
@@ -80,21 +75,13 @@ class FIRRTLModuleLike<string mnemonic, list<Trait> traits = []> :
 
   let extraClassDefinition = extraModuleClassDefinition # [{
 
-    circt::hw::InnerSymAttr $cppClass::getPortSymbolAttr(size_t portIndex) {
-      auto syms = getPortSymbols();
-      if (syms.empty() ||
-          syms[portIndex].template cast<hw::InnerSymAttr>().empty())
-        return hw::InnerSymAttr();
-      return syms[portIndex].template cast<hw::InnerSymAttr>();
-    }
-
     size_t $cppClass::getNumPorts() {
       return getPortTypesAttr().size();
     }
 
     size_t $cppClass::getNumInputPorts() {
       size_t count = 0;
-      for (unsigned i = 0, e = getNumPorts(); i < e; ++i)
+      for (size_t i = 0, e = getNumPorts(); i < e; ++i)
         if (getPortDirection(i) == Direction::In)
           ++count;
       return count;
@@ -102,14 +89,14 @@ class FIRRTLModuleLike<string mnemonic, list<Trait> traits = []> :
 
     size_t $cppClass::getNumOutputPorts() {
       size_t count = 0;
-      for (unsigned i = 0, e = getNumPorts(); i < e; ++i)
+      for (size_t i = 0, e = getNumPorts(); i < e; ++i)
         if (getPortDirection(i) == Direction::Out)
           ++count;
       return count;
     }
 
     size_t $cppClass::getPortIdForInputId(size_t idx) {
-      for (unsigned i = 0, e = getNumPorts(); i < e; ++i)
+      for (size_t i = 0, e = getNumPorts(); i < e; ++i)
         if (getPortDirection(i) == Direction::In) {
           if (!idx)
             return i;
@@ -120,7 +107,7 @@ class FIRRTLModuleLike<string mnemonic, list<Trait> traits = []> :
     }
 
     size_t $cppClass::getPortIdForOutputId(size_t idx) {
-      for (unsigned i = 0, e = getNumPorts(); i < e; ++i)
+      for (size_t i = 0, e = getNumPorts(); i < e; ++i)
         if (getPortDirection(i) == Direction::Out) {
           if (!idx)
             return i;
@@ -310,6 +297,7 @@ def ClassOp : FIRRTLModuleLike<"class", [
     // Class Ops do not support port annotations.
     // Override this method to return an empty array attr.
     "getPortAnnotationsAttr"]>,
+  DeclareOpInterfaceMethods<ClassLike>,
   DeclareOpInterfaceMethods<Symbol, ["canDiscardOnUseEmpty"]>]> {
   let summary = "FIRRTL Class";
   let description = [{
@@ -357,36 +345,121 @@ def ClassOp : FIRRTLModuleLike<"class", [
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
     ArrayAttr getParameters();
-
-    /// Verify that the given type agrees with this class.
-    LogicalResult verifyType(
-      ClassType type, function_ref<InFlightDiagnostic()> emitError);
-
-    /// Get the type for instances of this class.
-    ClassType getInstanceType();
   }];
 }
 
-def GroupDeclOp : FIRRTLOp<
-  "declgroup",
-  [IsolatedFromAbove, Symbol, SymbolTable, SingleBlock, NoTerminator,
-   ParentOneOf<["firrtl::CircuitOp", "firrtl::GroupDeclOp"]>]
-> {
-  let summary = "A declaration of an optional group";
+def ExtClassOp : FIRRTLModuleLike<"extclass", [
+  DeclareOpInterfaceMethods<FModuleLike, [
+    // Class Ops do not support port annotations.
+    // Override this method to return an empty array attr.
+    "getPortAnnotationsAttr"]>,
+  DeclareOpInterfaceMethods<ClassLike>,
+  DeclareOpInterfaceMethods<Symbol, ["canDiscardOnUseEmpty"]>]> {
+  let summary = "FIRRTL external class";
   let description = [{
-    The `firrtl.declgroup` operation declares an optional group and a lowering
-    convetion for that group.  Optional groups are a feature of FIRRTL that add
-    verification or debugging code to an existing module at runtime.
+    The "firrtl.extclass" operation represents a reference to an external
+    firrtl class, and includes a given name, as well as a list of ports.
+    Just as usual firrtl.class definitions, An ext.class may only have property
+    ports.
 
-    A `firrtl.declgroup` operation only declares the group and any groups nested
-    under the current declaration.  Functionality is added to modules using the
-    `firrtl.group` operation.
+    example:
+    ```mlir
+    firrtl.extclass @MyImportedClass(in in_str: !firrtl.string, out out_str: !firrtl.string)
+    ```
   }];
-  let arguments = (ins SymbolNameAttr:$sym_name, GroupConventionAttr:$convention);
+  let arguments = (ins SymbolNameAttr:$sym_name, APIntAttr:$portDirections,
+                       ArrayRefAttr:$portNames, ArrayRefAttr:$portTypes,
+                       ArrayRefAttr:$portSyms, ArrayRefAttr:$portLocations);
+  let results = (outs);
+  let regions = (region AnyRegion:$body);
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins
+      "StringAttr":$name,
+      "ArrayRef<PortInfo>":$ports
+    )>
+  ];
+  let extraModuleClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    ArrayAttr getParameters();
+  }];
+  let hasCustomAssemblyFormat = 1;
+}
+
+def LayerOp : FIRRTLOp<
+  "layer",
+  [IsolatedFromAbove, Symbol, SymbolTable, SingleBlock, NoTerminator,
+   ParentOneOf<["firrtl::CircuitOp", "firrtl::LayerOp"]>]
+> {
+  let summary = "A layer definition";
+  let description = [{
+    The `firrtl.layer` operation defines a layer and a lowering convention for
+    that layer.  Layers are a feature of FIRRTL that add verification or
+    debugging code to an existing module at runtime.
+
+    A `firrtl.layer` operation only defines the layer and any layers nested
+    under it.  Functionality is added to modules using the `firrtl.group`
+    operation.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name, LayerConventionAttr:$convention);
   let results = (outs);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     $sym_name $convention attr-dict-with-keyword $body
+  }];
+}
+
+def OptionOp : FIRRTLOp<"option", [
+    IsolatedFromAbove,
+    Symbol,
+    SymbolTable,
+    NoTerminator,
+    HasParent<"firrtl::CircuitOp">
+]> {
+  let summary = "An option group definition";
+  let description = [{
+    The `firrtl.option` operation defines a specializable parameter with a
+    known set of values, represented by the `firrtl.option_case` operations
+    nested underneath.
+
+    Operations which support specialization reference the option and its
+    cases to define the specializations they support.
+
+    Example:
+    ```mlir
+
+    firrtl.circuit {
+      firrtl.option @Target {
+        firrtl.option_case @FPGA
+        firrtl.option_case @ASIC
+      }
+    }
+    ```
+  }];
+
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let results = (outs);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name attr-dict-with-keyword $body
+  }];
+}
+
+def OptionCaseOp : FIRRTLOp<
+  "option_case", [Symbol, HasParent<"firrtl::OptionOp">]
+> {
+  let summary = "A configuration option value definition";
+  let description = [{
+    `firrtl.option_case` defines an acceptable value to be provided for an
+    option. Ops reference it to define their behavior when this case is active.
+  }];
+
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let results = (outs);
+  let assemblyFormat = [{
+    $sym_name attr-dict
   }];
 }
 

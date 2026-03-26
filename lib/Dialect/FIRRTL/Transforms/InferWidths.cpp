@@ -11,11 +11,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetails.h"
+
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/FIRRTL/FIRRTLVisitors.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
+#include "circt/Support/Debug.h"
 #include "circt/Support/FieldRef.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Threading.h"
@@ -78,16 +80,13 @@ static FieldRef getRefForIST(const hw::InnerSymTarget &ist) {
 
 /// Calculate the "InferWidths-fieldID" equivalent for the given fieldID + type.
 static uint64_t convertFieldIDToOurVersion(uint64_t fieldID, FIRRTLType type) {
-  auto fType = getBaseOfType<hw::FieldIDTypeInterface>(type);
-  if (!fType)
-    return fieldID;
-
   uint64_t convertedFieldID = 0;
 
   auto curFID = fieldID;
-  auto curFType = fType;
+  Type curFType = type;
   while (curFID != 0) {
-    auto [child, subID] = curFType.getSubTypeByFieldID(curFID);
+    auto [child, subID] =
+        hw::FieldIdImpl::getSubTypeByFieldID(curFType, curFID);
     if (isa<FVectorType>(curFType))
       convertedFieldID++; // Vector fieldID is 1.
     else
@@ -1011,13 +1010,16 @@ static ExprSolution solveExpr(Expr *expr, SmallPtrSetImpl<Expr *> &seenVars,
 /// present.
 LogicalResult ConstraintSolver::solve() {
   LLVM_DEBUG({
-    llvm::dbgs() << "\n===----- Constraints -----===\n\n";
+    llvm::dbgs() << "\n";
+    debugHeader("Constraints") << "\n\n";
     dumpConstraints(llvm::dbgs());
   });
 
   // Ensure that there are no adverse cycles around.
-  LLVM_DEBUG(
-      llvm::dbgs() << "\n===----- Checking for unbreakable loops -----===\n\n");
+  LLVM_DEBUG({
+    llvm::dbgs() << "\n";
+    debugHeader("Checking for unbreakable loops") << "\n\n";
+  });
   SmallPtrSet<Expr *, 16> seenVars;
   bool anyFailed = false;
 
@@ -1076,7 +1078,10 @@ LogicalResult ConstraintSolver::solve() {
     return failure();
 
   // Iterate over the constraint variables and solve each.
-  LLVM_DEBUG(llvm::dbgs() << "\n===----- Solving constraints -----===\n\n");
+  LLVM_DEBUG({
+    llvm::dbgs() << "\n";
+    debugHeader("Solving constraints") << "\n\n";
+  });
   unsigned defaultWorklistSize = exprs.size() / 2;
   for (auto *expr : exprs) {
     // Only work on variables.
@@ -1638,7 +1643,7 @@ LogicalResult InferenceMapping::mapOperation(Operation *op) {
 
       // Handle instances of other modules.
       .Case<InstanceOp>([&](auto op) {
-        auto refdModule = op.getReferencedModule(symtbl);
+        auto refdModule = op.getReferencedOperation(symtbl);
         auto module = dyn_cast<FModuleOp>(&*refdModule);
         if (!module) {
           auto diag = mlir::emitError(op.getLoc());
@@ -1940,7 +1945,7 @@ void InferenceMapping::constrainTypes(Expr *larger, Expr *smaller,
   // If the larger expr is a free variable, create a `expr >= x` constraint for
   // it that we can try to satisfy with the smallest width.
   if (auto largerVar = dyn_cast<VarExpr>(larger)) {
-    LLVM_ATTRIBUTE_UNUSED auto *c = solver.addGeqConstraint(largerVar, smaller);
+    [[maybe_unused]] auto *c = solver.addGeqConstraint(largerVar, smaller);
     LLVM_DEBUG(llvm::dbgs()
                << "Constrained " << *largerVar << " >= " << *c << "\n");
     // If we're constraining larger == smaller, add the LEQ contraint as well.
@@ -1949,8 +1954,7 @@ void InferenceMapping::constrainTypes(Expr *larger, Expr *smaller,
     // widths should be inferred strictly in one direction but are required to
     // also be equal for correctness.
     if (equal) {
-      LLVM_ATTRIBUTE_UNUSED auto *leq =
-          solver.addLeqConstraint(largerVar, smaller);
+      [[maybe_unused]] auto *leq = solver.addLeqConstraint(largerVar, smaller);
       LLVM_DEBUG(llvm::dbgs()
                  << "Constrained " << *largerVar << " <= " << *leq << "\n");
     }
@@ -1964,8 +1968,7 @@ void InferenceMapping::constrainTypes(Expr *larger, Expr *smaller,
   // besides indicating that a width is unsatisfiable.
   if (auto *smallerVar = dyn_cast<VarExpr>(smaller)) {
     if (imposeUpperBounds || equal) {
-      LLVM_ATTRIBUTE_UNUSED auto *c =
-          solver.addLeqConstraint(smallerVar, larger);
+      [[maybe_unused]] auto *c = solver.addLeqConstraint(smallerVar, larger);
       LLVM_DEBUG(llvm::dbgs()
                  << "Constrained " << *smallerVar << " <= " << *c << "\n");
     }
@@ -2084,7 +2087,10 @@ private:
 
 /// Update the types throughout a circuit.
 LogicalResult InferenceTypeUpdate::update(CircuitOp op) {
-  LLVM_DEBUG(llvm::dbgs() << "\n===----- Update types -----===\n\n");
+  LLVM_DEBUG({
+    llvm::dbgs() << "\n";
+    debugHeader("Update types") << "\n\n";
+  });
   return mlir::failableParallelForEach(
       op.getContext(), op.getOps<FModuleOp>(), [&](FModuleOp op) {
         // Skip this module if it had no widths to be

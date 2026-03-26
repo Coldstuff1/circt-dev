@@ -6,13 +6,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PassDetails.h"
+#include "circt/Dialect/Arc/ArcOps.h"
+#include "circt/Dialect/Arc/ArcPasses.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/SHA256.h"
 
 #define DEBUG_TYPE "arc-dedup"
+
+namespace circt {
+namespace arc {
+#define GEN_PASS_DEF_DEDUP
+#include "circt/Dialect/Arc/ArcPasses.h.inc"
+} // namespace arc
+} // namespace circt
 
 using namespace circt;
 using namespace arc;
@@ -321,11 +330,11 @@ private:
 } // namespace
 
 static void addCallSiteOperands(
-    MutableArrayRef<mlir::CallOpInterface> callSites,
+    SmallSetVector<mlir::CallOpInterface, 1> &callSites,
     ArrayRef<std::variant<Operation *, unsigned>> operandMappings) {
   SmallDenseMap<Operation *, Operation *> clonedOps;
   SmallVector<Value> newOperands;
-  for (auto &callOp : callSites) {
+  for (auto callOp : callSites) {
     OpBuilder builder(callOp);
     newOperands.clear();
     clonedOps.clear();
@@ -351,14 +360,15 @@ static bool isOutlinable(OpOperand &operand) {
 }
 
 namespace {
-struct DedupPass : public DedupBase<DedupPass> {
+struct DedupPass : public arc::impl::DedupBase<DedupPass> {
   void runOnOperation() override;
-  void replaceArcWith(DefineOp oldArc, DefineOp newArc);
+  void replaceArcWith(DefineOp oldArc, DefineOp newArc,
+                      SymbolTableCollection &symbolTable);
 
   /// A mapping from arc names to arc definitions.
   DenseMap<StringAttr, DefineOp> arcByName;
   /// A mapping from arc definitions to call sites.
-  DenseMap<DefineOp, SmallVector<mlir::CallOpInterface, 1>> callSites;
+  DenseMap<DefineOp, SmallSetVector<mlir::CallOpInterface, 1>> callSites;
 };
 
 struct ArcHash {
@@ -387,10 +397,7 @@ void DedupPass::runOnOperation() {
   getOperation().walk([&](mlir::CallOpInterface callOp) {
     if (auto defOp =
             dyn_cast_or_null<DefineOp>(callOp.resolveCallable(&symbolTable)))
-      callSites[arcByName.lookup(callOp.getCallableForCallee()
-                                     .get<mlir::SymbolRefAttr>()
-                                     .getLeafReference())]
-          .push_back(callOp);
+      callSites[defOp].insert(callOp);
   });
 
   // Sort the arcs by hash such that arcs with the same hash are next to each
@@ -427,7 +434,7 @@ void DedupPass::runOnOperation() {
       LLVM_DEBUG(llvm::dbgs()
                  << "- Merge " << defineOp.getSymNameAttr() << " <- "
                  << otherDefineOp.getSymNameAttr() << "\n");
-      replaceArcWith(otherDefineOp, defineOp);
+      replaceArcWith(otherDefineOp, defineOp, symbolTable);
       arcHashes[otherIdx].defineOp = {};
     }
   }
@@ -704,13 +711,14 @@ void DedupPass::runOnOperation() {
                  << "  - Merged " << defineOp.getSymNameAttr() << " <- "
                  << otherDefineOp.getSymNameAttr() << "\n");
       addCallSiteOperands(callSites[otherDefineOp], newOperands);
-      replaceArcWith(otherDefineOp, defineOp);
+      replaceArcWith(otherDefineOp, defineOp, symbolTable);
       arcHashes[otherIdx].defineOp = {};
     }
   }
 }
 
-void DedupPass::replaceArcWith(DefineOp oldArc, DefineOp newArc) {
+void DedupPass::replaceArcWith(DefineOp oldArc, DefineOp newArc,
+                               SymbolTableCollection &symbolTable) {
   ++dedupPassNumArcsDeduped;
   auto oldArcOps = oldArc.getOps();
   dedupPassTotalOps += std::distance(oldArcOps.begin(), oldArcOps.end());
@@ -719,8 +727,14 @@ void DedupPass::replaceArcWith(DefineOp oldArc, DefineOp newArc) {
   auto newArcName = SymbolRefAttr::get(newArc.getSymNameAttr());
   for (auto callOp : oldUses) {
     callOp.setCalleeFromCallable(newArcName);
-    newUses.push_back(callOp);
+    newUses.insert(callOp);
   }
+
+  oldArc.walk([&](mlir::CallOpInterface callOp) {
+    if (auto defOp =
+            dyn_cast_or_null<DefineOp>(callOp.resolveCallable(&symbolTable)))
+      callSites[defOp].remove(callOp);
+  });
   callSites.erase(oldArc);
   arcByName.erase(oldArc.getSymNameAttr());
   oldArc->erase();

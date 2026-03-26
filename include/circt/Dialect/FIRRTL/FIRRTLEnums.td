@@ -47,16 +47,16 @@ def Convention : I32EnumAttr<"Convention", "lowering convention", [
 def ConventionAttr : EnumAttr<FIRRTLDialect, Convention, "convention">;
 
 //===----------------------------------------------------------------------===//
-// Group Lowering Conventions
+// Layer Lowering Conventions
 //===----------------------------------------------------------------------===//
 
-def GroupConvention : I32EnumAttr<"GroupConvention", "group convention", [
+def LayerConvention : I32EnumAttr<"LayerConvention", "layer convention", [
   I32EnumAttrCase<"Bind", 0, "bind">]> {
 
   let genSpecializedAttr = 0;
 }
 
-def GroupConventionAttr : EnumAttr<FIRRTLDialect, GroupConvention, "groupconvention">;
+def LayerConventionAttr : EnumAttr<FIRRTLDialect, LayerConvention, "layerconvention">;
 
 //===----------------------------------------------------------------------===//
 // Read Under Write Behaviour
@@ -101,11 +101,12 @@ def EventControlAttr : I32EnumAttr<"EventControl", "edge control trigger",
 //===----------------------------------------------------------------------===//
 
 def DontTouch : I32EnumAttrCase<"DontTouch", 0, "dont_touch">;
-def MemberInstance: I32EnumAttrCase<"MemberInstance", 1, "member_instance">;
-def MemberReference: I32EnumAttrCase<"MemberReference", 2, "member_reference">;
-def Reference: I32EnumAttrCase<"Reference", 3, "reference">;
+def Instance : I32EnumAttrCase<"Instance", 1, "instance">;
+def MemberInstance: I32EnumAttrCase<"MemberInstance", 2, "member_instance">;
+def MemberReference: I32EnumAttrCase<"MemberReference", 3, "member_reference">;
+def Reference: I32EnumAttrCase<"Reference", 4, "reference">;
 def TargetKind : I32EnumAttr<"TargetKind", "object model target kind",
-  [DontTouch, MemberInstance, MemberReference, Reference]>  {}
+  [DontTouch, Instance, MemberInstance, MemberReference, Reference]>  {}
 
 }
 

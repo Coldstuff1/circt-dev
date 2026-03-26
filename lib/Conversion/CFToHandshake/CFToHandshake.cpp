@@ -5,7 +5,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===----------------------------------------------------------------------===//
 //
+// This file includes modifications made as part of the Dynamatic project.
+// See https://github.com/EPFL-LAP/dynamatic.
+//
+//===----------------------------------------------------------------------===//
+//
 // This is the main Standard to Handshake Conversion Pass Implementation.
+//
 //
 //===----------------------------------------------------------------------===//
 
@@ -199,10 +205,6 @@ handshake::partiallyLowerRegion(const RegionLoweringFunc &loweringFunc,
       partialLoweringSuccessfull.succeeded());
 }
 
-#define returnOnError(logicalResult)                                           \
-  if (failed(logicalResult))                                                   \
-    return failure();
-
 // ============================================================================
 // Start of lowering passes
 // ============================================================================
@@ -219,29 +221,34 @@ void HandshakeLowering::setBlockEntryControl(Block *block, Value v) {
 }
 
 void handshake::removeBasicBlocks(Region &r) {
-  auto &entryBlock = r.front().getOperations();
-
-  // Now that basic blocks are going to be removed, we can erase all cf-dialect
-  // branches, and move ReturnOp to the entry block's end
-  for (auto &block : r) {
-    Operation &termOp = block.back();
-    if (isa<mlir::cf::CondBranchOp, mlir::cf::BranchOp>(termOp))
-      termOp.erase();
-    else if (isa<handshake::ReturnOp>(termOp))
-      entryBlock.splice(entryBlock.end(), block.getOperations(), termOp);
-  }
+  Block *entryBlock = &r.front();
+  auto &entryBlockOps = entryBlock->getOperations();
 
   // Move all operations to entry block and erase other blocks.
-  for (auto &block : llvm::make_early_inc_range(llvm::drop_begin(r, 1))) {
-    entryBlock.splice(--entryBlock.end(), block.getOperations());
-  }
-  for (auto &block : llvm::make_early_inc_range(llvm::drop_begin(r, 1))) {
+  for (Block &block : llvm::make_early_inc_range(llvm::drop_begin(r, 1))) {
+    entryBlockOps.splice(entryBlockOps.end(), block.getOperations());
+
     block.clear();
     block.dropAllDefinedValueUses();
     for (size_t i = 0; i < block.getNumArguments(); i++) {
       block.eraseArgument(i);
     }
     block.erase();
+  }
+
+  // Remove any control flow operations, and move the non-control flow
+  // terminator op to the end of the entry block.
+  for (Operation &terminatorLike : llvm::make_early_inc_range(*entryBlock)) {
+    if (!terminatorLike.hasTrait<OpTrait::IsTerminator>())
+      continue;
+
+    if (isa<mlir::cf::CondBranchOp, mlir::cf::BranchOp>(terminatorLike)) {
+      terminatorLike.erase();
+      continue;
+    }
+
+    // Else, assume that this is a return-like terminator op.
+    terminatorLike.moveBefore(entryBlock, entryBlock->end());
   }
 }
 
@@ -365,7 +372,7 @@ HandshakeLowering::insertMergeOps(HandshakeLowering::ValueMap &mergePairs,
 
 // Get value from predBlock which will be set as operand of op (merge)
 static Value getMergeOperand(HandshakeLowering::MergeOpInfo mergeInfo,
-                             Block *predBlock) {
+                             Block *predBlock, bool isFirstOperand) {
   // The input value to the merge operations
   Value srcVal = mergeInfo.val;
   // The block the merge operation belongs to
@@ -378,9 +385,13 @@ static Value getMergeOperand(HandshakeLowering::MergeOpInfo mergeInfo,
   Operation *termOp = predBlock->getTerminator();
   if (mlir::cf::CondBranchOp br = dyn_cast<mlir::cf::CondBranchOp>(termOp)) {
     // Block should be one of the two destinations of the conditional branch
-    if (block == br.getTrueDest())
+    auto *trueDest = br.getTrueDest(), *falseDest = br.getFalseDest();
+    if (block == trueDest) {
+      if (!isFirstOperand && trueDest == falseDest)
+        return br.getFalseOperand(index);
       return br.getTrueOperand(index);
-    assert(block == br.getFalseDest());
+    }
+    assert(block == falseDest);
     return br.getFalseOperand(index);
   }
   if (isa<mlir::cf::BranchOp>(termOp))
@@ -432,10 +443,11 @@ static void reconnectMergeOps(Region &r,
 
   for (Block &block : r) {
     for (auto &mergeInfo : blockMerges[&block]) {
-      int operandIdx = 0;
+      size_t operandIdx = 0;
       // Set appropriate operand from each predecessor block
       for (auto *predBlock : block.getPredecessors()) {
-        Value mgOperand = getMergeOperand(mergeInfo, predBlock);
+        Value mgOperand =
+            getMergeOperand(mergeInfo, predBlock, operandIdx == 0);
         assert(mgOperand != nullptr);
         if (!mgOperand.getDefiningOp()) {
           assert(mergePairs.count(mgOperand));
@@ -499,33 +511,6 @@ HandshakeLowering::addMergeOps(ConversionPatternRewriter &rewriter) {
   return success();
 }
 
-static bool isLiveOut(Value val) {
-  // Identifies liveout values after adding Merges
-  for (auto &u : val.getUses())
-    // Result is liveout if used by some Merge block
-    if (isa<MergeLikeOpInterface>(u.getOwner()))
-      return true;
-  return false;
-}
-
-// A value can have multiple branches in a single successor block
-// (for instance, there can be an SSA phi and a merge that we insert)
-// This function determines the number of branches to insert based on the
-// value uses in successor blocks
-static int getBranchCount(Value val, Block *block) {
-  int uses = 0;
-  for (int i = 0, e = block->getNumSuccessors(); i < e; ++i) {
-    int curr = 0;
-    Block *succ = block->getSuccessor(i);
-    for (auto &u : val.getUses()) {
-      if (u.getOwner()->getBlock() == succ)
-        curr++;
-    }
-    uses = (curr > uses) ? curr : uses;
-  }
-  return uses;
-}
-
 namespace {
 
 /// This class inserts a reorder prevention mechanism for blocks with multiple
@@ -575,7 +560,7 @@ HandshakeLowering::feedForwardRewriting(ConversionPatternRewriter &rewriter) {
   return FeedForwardNetworkRewriter(*this, rewriter).apply();
 }
 
-static bool loopsHaveSingleExit(CFGLoopInfo &loopInfo) {
+[[maybe_unused]] static bool loopsHaveSingleExit(CFGLoopInfo &loopInfo) {
   for (CFGLoop *loop : loopInfo.getTopLevelLoops())
     if (!loop->getExitBlock())
       return false;
@@ -1108,49 +1093,51 @@ static Value getSuccResult(Operation *termOp, Operation *newOp,
   return newOp->getResult(0);
 }
 
+static OperandRange getBranchOperands(Operation *termOp) {
+  if (auto condBranchOp = dyn_cast<mlir::cf::CondBranchOp>(termOp))
+    return condBranchOp.getOperands().drop_front();
+  assert(isa<mlir::cf::BranchOp>(termOp) && "unsupported block terminator");
+  return termOp->getOperands();
+}
+
 LogicalResult
 HandshakeLowering::addBranchOps(ConversionPatternRewriter &rewriter) {
-
-  BlockValues liveOuts;
-
-  for (Block &block : r) {
-    for (Operation &op : block) {
-      for (auto result : op.getResults())
-        if (isLiveOut(result))
-          liveOuts[&block].push_back(result);
-    }
-  }
 
   for (Block &block : r) {
     Operation *termOp = block.getTerminator();
     rewriter.setInsertionPoint(termOp);
 
-    for (Value val : liveOuts[&block]) {
-      // Count the number of branches which the liveout needs
-      int numBranches = getBranchCount(val, &block);
+    Value condValue = nullptr;
+    if (auto condBranchOp = dyn_cast<mlir::cf::CondBranchOp>(termOp))
+      condValue = condBranchOp.getCondition();
+    else if (isa<mlir::func::ReturnOp>(termOp))
+      continue;
 
-      // Instantiate branches and connect to Merges
-      for (int i = 0, e = numBranches; i < e; ++i) {
-        Operation *newOp = nullptr;
+    // Insert a branch-like operation for each live-out and replace the original
+    // branch operand value in successor blocks with the result(s) of the new
+    // operation
+    for (Value val : getBranchOperands(termOp)) {
 
-        if (auto condBranchOp = dyn_cast<mlir::cf::CondBranchOp>(termOp))
-          newOp = rewriter.create<handshake::ConditionalBranchOp>(
-              termOp->getLoc(), condBranchOp.getCondition(), val);
-        else if (isa<mlir::cf::BranchOp>(termOp))
-          newOp = rewriter.create<handshake::BranchOp>(termOp->getLoc(), val);
+      // Create a branch-like operation for the branch operand
+      Operation *newOp = nullptr;
+      if (condValue)
+        newOp = rewriter.create<handshake::ConditionalBranchOp>(
+            termOp->getLoc(), condValue, val);
+      else
+        newOp = rewriter.create<handshake::BranchOp>(termOp->getLoc(), val);
 
-        if (newOp == nullptr)
-          continue;
+      // Connect the newly created branch's output with its successors
+      for (int j = 0, e = block.getNumSuccessors(); j < e; ++j) {
+        Block *succ = block.getSuccessor(j);
 
-        for (int j = 0, e = block.getNumSuccessors(); j < e; ++j) {
-          Block *succ = block.getSuccessor(j);
-          Value res = getSuccResult(termOp, newOp, succ);
-
-          for (auto &u : val.getUses()) {
-            if (u.getOwner()->getBlock() == succ) {
-              u.getOwner()->replaceUsesOfWith(val, res);
-              break;
-            }
+        // Look for the merge-like operation in the successor block that takes
+        // as input the original branch operand, and replace the latter with a
+        // result of the newly inserted branch operation
+        for (auto *user : val.getUsers()) {
+          if (user->getBlock() == succ &&
+              isa<handshake::MergeLikeOpInterface>(user)) {
+            user->replaceUsesOfWith(val, getSuccResult(termOp, newOp, succ));
+            break;
           }
         }
       }
@@ -1590,9 +1577,9 @@ HandshakeLowering::connectToMemory(ConversionPatternRewriter &rewriter,
       // user-determined)
       bool control = true;
 
-      if (control)
-        returnOnError(
-            setJoinControlInputs(memory.second, newOp, ld_count, newInd));
+      if (control &&
+          setJoinControlInputs(memory.second, newOp, ld_count, newInd).failed())
+        return failure();
 
       // Set control-only inputs to each memory op
       // Ensure that op starts only after prior blocks have completed
@@ -1684,31 +1671,39 @@ static LogicalResult lowerFuncOp(func::FuncOp funcOp, MLIRContext *ctx,
 
   // Add control input/output to function arguments/results and create a
   // handshake::FuncOp of appropriate type
-  returnOnError(partiallyLowerOp<func::FuncOp>(
-      [&](func::FuncOp funcOp, PatternRewriter &rewriter) {
-        auto noneType = rewriter.getNoneType();
-        resTypes.push_back(noneType);
-        argTypes.push_back(noneType);
-        auto func_type = rewriter.getFunctionType(argTypes, resTypes);
-        newFuncOp = rewriter.create<handshake::FuncOp>(
-            funcOp.getLoc(), funcOp.getName(), func_type, attributes);
-        rewriter.inlineRegionBefore(funcOp.getBody(), newFuncOp.getBody(),
-                                    newFuncOp.end());
-        if (!newFuncOp.isExternal())
-          newFuncOp.resolveArgAndResNames();
-        rewriter.eraseOp(funcOp);
-        return success();
-      },
-      ctx, funcOp));
+  if (partiallyLowerOp<func::FuncOp>(
+          [&](func::FuncOp funcOp, PatternRewriter &rewriter) {
+            auto noneType = rewriter.getNoneType();
+            resTypes.push_back(noneType);
+            argTypes.push_back(noneType);
+            auto func_type = rewriter.getFunctionType(argTypes, resTypes);
+            newFuncOp = rewriter.create<handshake::FuncOp>(
+                funcOp.getLoc(), funcOp.getName(), func_type, attributes);
+            rewriter.inlineRegionBefore(funcOp.getBody(), newFuncOp.getBody(),
+                                        newFuncOp.end());
+            if (!newFuncOp.isExternal()) {
+              newFuncOp.getBodyBlock()->addArgument(rewriter.getNoneType(),
+                                                    funcOp.getLoc());
+              newFuncOp.resolveArgAndResNames();
+            }
+            rewriter.eraseOp(funcOp);
+            return success();
+          },
+          ctx, funcOp)
+          .failed())
+    return failure();
 
   // Apply SSA maximization
-  returnOnError(
-      partiallyLowerRegion(maximizeSSANoMem, ctx, newFuncOp.getBody()));
+  if (partiallyLowerRegion(maximizeSSANoMem, ctx, newFuncOp.getBody()).failed())
+    return failure();
 
   if (!newFuncOp.isExternal()) {
+    Block *bodyBlock = newFuncOp.getBodyBlock();
+    Value entryCtrl = bodyBlock->getArguments().back();
     HandshakeLowering fol(newFuncOp.getBody());
-    returnOnError(lowerRegion<func::ReturnOp>(fol, sourceConstants,
-                                              disableTaskPipelining));
+    if (failed(lowerRegion<func::ReturnOp, handshake::ReturnOp>(
+            fol, sourceConstants, disableTaskPipelining, entryCtrl)))
+      return failure();
   }
 
   return success();
@@ -1736,11 +1731,6 @@ struct CFToHandshakePass : public CFToHandshakeBase<CFToHandshakePass> {
         return;
       }
     }
-
-    // Legalize the resulting regions, removing basic blocks and performing
-    // any simple conversions.
-    for (auto func : m.getOps<handshake::FuncOp>())
-      removeBasicBlocks(func);
   }
 };
 

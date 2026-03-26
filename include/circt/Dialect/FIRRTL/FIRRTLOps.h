@@ -13,6 +13,7 @@
 #ifndef CIRCT_DIALECT_FIRRTL_OPS_H
 #define CIRCT_DIALECT_FIRRTL_OPS_H
 
+#include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOpInterfaces.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
@@ -20,11 +21,12 @@
 #include "circt/Dialect/HW/InnerSymbolTable.h"
 #include "circt/Dialect/Seq/SeqAttributes.h"
 #include "circt/Support/FieldRef.h"
+#include "circt/Support/InstanceGraph.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/RegionKindInterface.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
@@ -32,9 +34,6 @@ namespace circt {
 namespace firrtl {
 
 class StrictConnectOp;
-
-// is the name useless?
-bool isUselessName(circt::StringRef name);
 
 // works for regs, nodes, and wires
 bool hasDroppableName(Operation *op);

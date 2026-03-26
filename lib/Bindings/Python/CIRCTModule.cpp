@@ -10,15 +10,18 @@
 
 #include "circt-c/Conversion.h"
 #include "circt-c/Dialect/Comb.h"
+#include "circt-c/Dialect/Debug.h"
 #include "circt-c/Dialect/ESI.h"
 #include "circt-c/Dialect/FSM.h"
 #include "circt-c/Dialect/HW.h"
 #include "circt-c/Dialect/HWArith.h"
 #include "circt-c/Dialect/Handshake.h"
+#include "circt-c/Dialect/LTL.h"
 #include "circt-c/Dialect/MSFT.h"
 #include "circt-c/Dialect/OM.h"
 #include "circt-c/Dialect/SV.h"
 #include "circt-c/Dialect/Seq.h"
+#include "circt-c/Dialect/Verif.h"
 #include "circt-c/ExportVerilog.h"
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir-c/IR.h"
@@ -60,6 +63,10 @@ PYBIND11_MODULE(_circt, m) {
         mlirDialectHandleRegisterDialect(comb, context);
         mlirDialectHandleLoadDialect(comb, context);
 
+        MlirDialectHandle debug = mlirGetDialectHandle__debug__();
+        mlirDialectHandleRegisterDialect(debug, context);
+        mlirDialectHandleLoadDialect(debug, context);
+
         MlirDialectHandle esi = mlirGetDialectHandle__esi__();
         mlirDialectHandleRegisterDialect(esi, context);
         mlirDialectHandleLoadDialect(esi, context);
@@ -95,6 +102,14 @@ PYBIND11_MODULE(_circt, m) {
         MlirDialectHandle handshake = mlirGetDialectHandle__handshake__();
         mlirDialectHandleRegisterDialect(handshake, context);
         mlirDialectHandleLoadDialect(handshake, context);
+
+        MlirDialectHandle ltl = mlirGetDialectHandle__ltl__();
+        mlirDialectHandleRegisterDialect(ltl, context);
+        mlirDialectHandleLoadDialect(ltl, context);
+
+        MlirDialectHandle verif = mlirGetDialectHandle__verif__();
+        mlirDialectHandleRegisterDialect(verif, context);
+        mlirDialectHandleLoadDialect(verif, context);
       },
       "Register CIRCT dialects on a PyMlirContext.");
 
@@ -115,6 +130,8 @@ PYBIND11_MODULE(_circt, m) {
   circt::python::populateDialectMSFTSubmodule(msft);
   py::module hw = m.def_submodule("_hw", "HW API");
   circt::python::populateDialectHWSubmodule(hw);
+  py::module seq = m.def_submodule("_seq", "Seq API");
+  circt::python::populateDialectSeqSubmodule(seq);
   py::module om = m.def_submodule("_om", "OM API");
   circt::python::populateDialectOMSubmodule(om);
   py::module sv = m.def_submodule("_sv", "SV API");

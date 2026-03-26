@@ -11,8 +11,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
@@ -175,8 +175,8 @@ LogicalResult MachineOp::verify() {
   return success();
 }
 
-hw::ModulePortInfo MachineOp::getPortList() {
-  SmallVector<hw::PortInfo> inputs, outputs;
+SmallVector<::circt::hw::PortInfo> MachineOp::getPortList() {
+  SmallVector<hw::PortInfo> ports;
   auto argNames = getArgNames();
   auto argTypes = getFunctionType().getInputs();
   for (unsigned i = 0, e = argTypes.size(); i < e; ++i) {
@@ -191,7 +191,7 @@ hw::ModulePortInfo MachineOp::getPortList() {
     auto direction = isInOut ? hw::ModulePort::Direction::InOut
                              : hw::ModulePort::Direction::Input;
 
-    inputs.push_back(
+    ports.push_back(
         {{argNames ? (*argNames)[i].cast<StringAttr>()
                    : StringAttr::get(getContext(), Twine("input") + Twine(i)),
           type, direction},
@@ -203,16 +203,15 @@ hw::ModulePortInfo MachineOp::getPortList() {
   auto resultNames = getResNames();
   auto resultTypes = getFunctionType().getResults();
   for (unsigned i = 0, e = resultTypes.size(); i < e; ++i) {
-    outputs.push_back(
-        {{resultNames
-              ? (*resultNames)[i].cast<StringAttr>()
-              : StringAttr::get(getContext(), Twine("output") + Twine(i)),
-          resultTypes[i], hw::ModulePort::Direction::Output},
-         i,
-         {},
-         {}});
+    ports.push_back({{resultNames ? (*resultNames)[i].cast<StringAttr>()
+                                  : StringAttr::get(getContext(),
+                                                    Twine("output") + Twine(i)),
+                      resultTypes[i], hw::ModulePort::Direction::Output},
+                     i,
+                     {},
+                     {}});
   }
-  return hw::ModulePortInfo(inputs, outputs);
+  return ports;
 }
 
 //===----------------------------------------------------------------------===//
@@ -285,11 +284,6 @@ LogicalResult TriggerOp::verify() { return verifyCallerTypes(*this); }
 //===----------------------------------------------------------------------===//
 
 // InstanceOpInterface interface
-Operation *HWInstanceOp::getReferencedModuleSlow() { return getMachineOp(); }
-
-Operation *HWInstanceOp::getReferencedModule(SymbolTable &symtbl) {
-  return symtbl.lookup(getMachineAttr().getValue());
-}
 
 /// Lookup the machine for the symbol.  This returns null on invalid IR.
 MachineOp HWInstanceOp::getMachineOp() {
@@ -299,7 +293,7 @@ MachineOp HWInstanceOp::getMachineOp() {
 
 LogicalResult HWInstanceOp::verify() { return verifyCallerTypes(*this); }
 
-hw::ModulePortInfo HWInstanceOp::getPortList() {
+SmallVector<hw::PortInfo> HWInstanceOp::getPortList() {
   return getMachineOp().getPortList();
 }
 

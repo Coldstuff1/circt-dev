@@ -4,6 +4,11 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+//============================================================================//
+//
+// This file includes modifications made as part of the Dynamatic project.
+// See https://github.com/EPFL-LAP/dynamatic.
+//
 //===----------------------------------------------------------------------===//
 //
 // This is the definition file for the structured interface for Handshake ops.
@@ -15,7 +20,18 @@
 
 include "mlir/IR/OpBase.td"
 
+def FineGrainedDataflowRegionOpInterface : OpInterface<"FineGrainedDataflowRegionOpInterface"> {
+  let description = [{
+    An interface for describing operations that define fine-grained dataflow regions.
+    The interface doesn't provide any methods, but is instead used to ensure
+    that users of handshake ops explicitly acknowledge that a given region has
+    fine-grained dataflow semantics.
+  }];
+  let cppNamespace = "::circt::handshake";
+}
+
 def SOSTInterface : OpInterface<"SOSTInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description = [{
       Sized Operation with Single Type (SOST).
       
@@ -30,9 +46,9 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
         The default implementation of this method simply returns the type of
         the first operation operand.
       }],
-      "Type", "getDataType", (ins), "",
+      "mlir::Type", "getDataType", (ins), "",
       [{
-        auto concreteOp = cast<ConcreteOp>($_op);
+        auto concreteOp = mlir::cast<ConcreteOp>($_op);
         return concreteOp->getOperands().front().getType();
       }]
     >,
@@ -43,7 +59,7 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
       }],
       "unsigned", "getSize", (ins), "",
       [{
-        auto concreteOp = cast<ConcreteOp>($_op);
+        auto concreteOp = mlir::cast<ConcreteOp>($_op);
         return concreteOp->getNumOperands();
       }]
     >,
@@ -55,10 +71,10 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
       }],
       "bool", "sostIsControl", (ins), "",
       [{
-        auto concreteOp = cast<ConcreteOp>($_op);
+        auto concreteOp = mlir::cast<ConcreteOp>($_op);
         // The operation is a control operation if its single data type is a 
         // NoneType.
-        return concreteOp.getDataType().template isa<NoneType>();
+        return concreteOp.getDataType().template isa<mlir::NoneType>();
       }]
     >,
     InterfaceMethod<[{
@@ -71,7 +87,7 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
         "mlir::OpAsmPrinter &": $printer, "bool": $explicitSize
       ), "", 
       [{
-        auto concreteOp = cast<ConcreteOp>($_op);
+        auto concreteOp = mlir::cast<ConcreteOp>($_op);
 
         if (explicitSize) {
           printer << " [" << concreteOp.getSize() << "]";
@@ -84,7 +100,7 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
   ];
 
   let verify = [{
-    auto concreteOp = cast<ConcreteOp>($_op);
+    auto concreteOp = mlir::cast<ConcreteOp>($_op);
 
     // SOST operation's size must be at least one
     if (concreteOp.getSize() < 1) {
@@ -100,11 +116,12 @@ def SOSTInterface : OpInterface<"SOSTInterface"> {
         return concreteOp.emitOpError("SOST operation reports having data type ")
           << dataType << ", but one operand has type " << operand.getType();
     
-    return success();
+    return mlir::success();
   }];
 }
 
 def MergeLikeOpInterface : OpInterface<"MergeLikeOpInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description = [{
      Some handshake operations can have predecessors in other
      blocks. This is primarily useful for verification purposes during
@@ -115,30 +132,31 @@ def MergeLikeOpInterface : OpInterface<"MergeLikeOpInterface"> {
     InterfaceMethod<[{
         Returns an operand range over the data signals being merged.
       }],
-      "OperandRange", "getDataOperands", (ins)
+      "mlir::OperandRange", "getDataOperands", (ins)
     >,
   ];
 
   let verify = [{
-    auto concreteOp = cast<ConcreteOp>($_op);
+    auto concreteOp = mlir::cast<ConcreteOp>($_op);
 
     auto operands = concreteOp.getDataOperands();
 
     if (!operands.size())
       return concreteOp.emitOpError("must have at least one data operand");
 
-    Type resultType = $_op->getResult(0).getType();
+    mlir::Type resultType = $_op->getResult(0).getType();
 
     for (auto operand : operands)
       if (operand.getType() != resultType)
         return concreteOp.emitOpError("operand has type ") << operand.getType()
             << ", but result has type " << resultType;
 
-    return success();
+    return mlir::success();
   }];
 }
 
 def GeneralOpInterface : OpInterface<"GeneralOpInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description =
       [{"Simulate the Execution of ops. The op takes a set of input values and "
         "returns the corresponding outputs assuming the precondition to "
@@ -154,6 +172,7 @@ def GeneralOpInterface : OpInterface<"GeneralOpInterface"> {
 }
 
 def ExecutableOpInterface : OpInterface<"ExecutableOpInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description = [{"Simulate the Execution of ops"}];
 
   let methods = [
@@ -181,6 +200,7 @@ def ExecutableOpInterface : OpInterface<"ExecutableOpInterface"> {
 }
 
 def MemoryOpInterface : OpInterface<"MemoryOpInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description =
       [{"Allocate the memory to the meory map in the simulation. "}];
 
@@ -188,13 +208,118 @@ def MemoryOpInterface : OpInterface<"MemoryOpInterface"> {
     InterfaceMethod<
         "Simulate the memory allocation in the memoryMap", "bool",
         "allocateMemory",
-        (ins "llvm::DenseMap<unsigned, unsigned> &" : $memoryMap,
-    "std::vector<std::vector<llvm::Any>> &" : $store,
-    "std::vector<double> &" : $storeTimes)>,
+        (ins  "llvm::DenseMap<unsigned, unsigned> &" : $memoryMap, 
+              "std::vector<std::vector<llvm::Any>> &" : $store,
+              "std::vector<double> &" : $storeTimes),
+        "",
+        [{
+          return false;
+        }]>,
+    InterfaceMethod<
+        "Returns the memory interface's operands related to memory ports.",
+        "mlir::ValueRange", "getMemOperands", (ins),
+        "",
+        [{
+          ConcreteOp concreteOp = cast<ConcreteOp>($_op);
+          return concreteOp.getMemInputs();
+        }]>,
+    InterfaceMethod<
+        "Returns the memory interface's results related to memory ports.",
+        "mlir::ValueRange", "getMemResults", (ins),
+        "",
+        [{
+          ConcreteOp concreteOp = cast<ConcreteOp>($_op);
+          return concreteOp.getMemOutputs();
+        }]>
+  ];
+}
+
+def LoadOpInterface : OpInterface<"LoadOpInterface"> {
+  let cppNamespace = "::circt::handshake";
+  let description = [{
+    Handhsake operations which act as load ports to a memory interface.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+    "Returns the load port's address input (from the circuit).",
+    "mlir::Value", "getAddressInput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getAddress();
+    }]>,
+    InterfaceMethod<
+    "Returns the load port's data input (from the memory interface).",
+    "mlir::Value", "getDataInput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getData();
+    }]>,
+    InterfaceMethod<
+    "Returns the load port's address output (to the memory interface).",
+    "mlir::Value", "getAddressOutput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getAddressResult();
+    }]>,
+    InterfaceMethod<
+    "Returns the load port's data output (to the circuit).",
+    "mlir::Value", "getDataOutput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getDataResult();
+    }]>,
+  ];
+}
+
+def StoreOpInterface : OpInterface<"StoreOpInterface"> {
+  let cppNamespace = "::circt::handshake";
+  let description = [{
+    Handhsake operations which act as store ports to a memory interface.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+    "Returns the store port's address input (from the circuit).",
+    "mlir::Value", "getAddressInput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getAddress();
+    }]>,
+    InterfaceMethod<
+    "Returns the store port's data input (from the circuit).",
+    "mlir::Value", "getDataInput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getData();
+    }]>,
+    InterfaceMethod<
+    "Returns the store port's address output (to the memory interface).",
+    "mlir::Value", "getAddressOutput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getAddressResult();
+    }]>,
+    InterfaceMethod<
+    "Returns the store port's data output (to the memory interface).",
+    "mlir::Value", "getDataOutput", (ins),
+    "",
+    [{
+      ConcreteOp concreteOp = mlir::cast<ConcreteOp>($_op);
+      return concreteOp.getDataResult();
+    }]>,
   ];
 }
 
 def NamedIOInterface : OpInterface<"NamedIOInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description =
       [{"Provides detailed names for the operands and results of an operation."}];
 
@@ -219,6 +344,7 @@ def NamedIOInterface : OpInterface<"NamedIOInterface"> {
 }
 
 def ControlInterface : OpInterface<"ControlInterface"> {
+  let cppNamespace = "::circt::handshake";
   let description =
       [{"Provides information on whether this operation is a control operation."}];
 

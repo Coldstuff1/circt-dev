@@ -17,6 +17,7 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "circt/Dialect/Handshake/HandshakePasses.h"
 #include "circt/Support/BackedgeBuilder.h"
+#include "circt/Transforms/Passes.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include <memory>
@@ -28,63 +29,6 @@ class OperationPass;
 } // namespace mlir
 
 namespace circt {
-
-/// Strategy class to control the behavior of SSA maximization. The class
-/// exposes overridable filter functions to dynamically select which blocks,
-/// block arguments, operations, and operation results should be put into
-/// maximal SSA form. All filter functions should return true whenever the
-/// entity they operate on should be considered for SSA maximization. By
-/// default, all filter functions always return true.
-class SSAMaximizationStrategy {
-public:
-  /// Determines whether a block should have the values it defines (i.e., block
-  /// arguments and operation results within the block) SSA maximized.
-  virtual bool maximizeBlock(Block *block);
-  /// Determines whether a block argument should be SSA maximized.
-  virtual bool maximizeArgument(BlockArgument arg);
-  /// Determines whether an operation should have its results SSA maximized.
-  virtual bool maximizeOp(Operation *op);
-  /// Determines whether an operation's result should be SSA maximized.
-  virtual bool maximizeResult(OpResult res);
-
-  virtual ~SSAMaximizationStrategy() = default;
-};
-
-/// Converts a single value within a function into maximal SSA form. This
-/// removes any implicit dataflow of this specific value within the enclosing
-/// function. The function adds new block arguments wherever necessary to carry
-/// the value explicitly between blocks.
-/// Succeeds when it was possible to convert the value into maximal SSA form.
-LogicalResult maximizeSSA(Value value, PatternRewriter &rewriter);
-
-/// Considers all of an operation's results for SSA maximization, following a
-/// provided strategy. This removes any implicit dataflow of the selected
-/// operation's results within the enclosing function. The function adds new
-/// block arguments wherever necessary to carry the results explicitly between
-/// blocks. Succeeds when it was possible to convert the selected operation's
-/// results into maximal SSA form.
-LogicalResult maximizeSSA(Operation *op, SSAMaximizationStrategy &strategy,
-                          PatternRewriter &rewriter);
-
-/// Considers all values defined by a block (i.e., block arguments and operation
-/// results within the block) for SSA maximization, following a provided
-/// strategy. This removes any implicit dataflow of the selected values within
-/// the enclosing function. The function adds new block arguments wherever
-/// necessary to carry the values explicitly between blocks. Succeeds when it
-/// was possible to convert the selected values defined by the block into
-/// maximal SSA form.
-LogicalResult maximizeSSA(Block *block, SSAMaximizationStrategy &strategy,
-                          PatternRewriter &rewriter);
-
-/// Considers all blocks within a region for SSA maximization, following a
-/// provided strategy. This removes any implicit dataflow of the values defined
-/// by selected blocks within the region. The function adds new block arguments
-/// wherever necessary to carry the region's values explicitly between blocks.
-/// Succeeds when it was possible to convert all of the values defined by
-/// selected blocks into maximal SSA form.
-LogicalResult maximizeSSA(Region &region, SSAMaximizationStrategy &strategy,
-                          PatternRewriter &rewriter);
-
 namespace handshake {
 
 // ============================================================================
@@ -125,23 +69,22 @@ public:
   LogicalResult addBranchOps(ConversionPatternRewriter &rewriter);
   LogicalResult replaceCallOps(ConversionPatternRewriter &rewriter);
 
-  template <typename TTerm>
-  LogicalResult setControlOnlyPath(ConversionPatternRewriter &rewriter) {
+  template <typename TSrcTerm, typename TDstTerm>
+  LogicalResult setControlOnlyPath(ConversionPatternRewriter &rewriter,
+                                   Value entryCtrl) {
+    assert(entryCtrl.getType().isa<NoneType>() &&
+           "Expected NoneType for entry control value");
     // Creates start and end points of the control-only path
-
-    // Add start point of the control-only path to the entry block's arguments
     Block *entryBlock = &r.front();
-    startCtrl = entryBlock->addArgument(rewriter.getNoneType(),
-                                        rewriter.getUnknownLoc());
-    setBlockEntryControl(entryBlock, startCtrl);
+    setBlockEntryControl(entryBlock, entryCtrl);
 
     // Replace original return ops with new returns with additional control
     // input
-    for (auto retOp : llvm::make_early_inc_range(r.getOps<TTerm>())) {
+    for (auto retOp : llvm::make_early_inc_range(r.getOps<TSrcTerm>())) {
       rewriter.setInsertionPoint(retOp);
       SmallVector<Value, 8> operands(retOp->getOperands());
-      operands.push_back(startCtrl);
-      rewriter.replaceOpWithNewOp<handshake::ReturnOp>(retOp, operands);
+      operands.push_back(entryCtrl);
+      rewriter.replaceOpWithNewOp<TDstTerm>(retOp, operands);
     }
 
     // Store the number of block arguments in each block
@@ -152,7 +95,7 @@ public:
     // Apply SSA maximization on the newly added entry block argument to
     // propagate it explicitly between the start-point of the control-only
     // network and the function's terminators
-    if (failed(maximizeSSA(startCtrl, rewriter)))
+    if (failed(maximizeSSA(entryCtrl, rewriter)))
       return failure();
 
     // Identify all block arguments belonging to the control-only network
@@ -226,13 +169,19 @@ LogicalResult runPartialLowering(
       instance.getContext(), instance.getRegion());
 }
 
+/// Remove basic blocks inside the given region. This allows the result to be
+/// a valid graph region, since multi-basic block regions are not allowed to
+/// be graph regions currently.
+void removeBasicBlocks(Region &r);
+
 // Helper to check the validity of the dataflow conversion
 // Driver that applies the partial lowerings expressed in HandshakeLowering to
 // the region encapsulated in it. The region is assumed to have a terminator of
-// type TTerm. See HandshakeLowering for the different lowering steps.
-template <typename TTerm>
+// type TSrcTerm, and will replace it with TDstTerm. See HandshakeLowering for
+// the different lowering steps.
+template <typename TSrcTerm, typename TDstTerm>
 LogicalResult lowerRegion(HandshakeLowering &hl, bool sourceConstants,
-                          bool disableTaskPipelining) {
+                          bool disableTaskPipelining, Value entryCtrl) {
   //  Perform initial dataflow conversion. This process allows for the use of
   //  non-deterministic merge-like operations.
   HandshakeLowering::MemRefToMemoryAccessOp memOps;
@@ -240,8 +189,9 @@ LogicalResult lowerRegion(HandshakeLowering &hl, bool sourceConstants,
   if (failed(
           runPartialLowering(hl, &HandshakeLowering::replaceMemoryOps, memOps)))
     return failure();
-  if (failed(runPartialLowering(hl,
-                                &HandshakeLowering::setControlOnlyPath<TTerm>)))
+  if (failed(runPartialLowering(
+          hl, &HandshakeLowering::setControlOnlyPath<TSrcTerm, TDstTerm>,
+          entryCtrl)))
     return failure();
   if (failed(runPartialLowering(hl, &HandshakeLowering::addMergeOps)))
     return failure();
@@ -271,13 +221,12 @@ LogicalResult lowerRegion(HandshakeLowering &hl, bool sourceConstants,
                                 lsq)))
     return failure();
 
+  // Legalize the resulting regions, removing basic blocks and performing
+  // any simple conversions.
+  removeBasicBlocks(hl.getRegion());
+
   return success();
 }
-
-/// Remove basic blocks inside the given region. This allows the result to be
-/// a valid graph region, since multi-basic block regions are not allowed to
-/// be graph regions currently.
-void removeBasicBlocks(Region &r);
 
 /// Lowers the mlir operations into handshake that are not part of the dataflow
 /// conversion.
@@ -308,12 +257,6 @@ mlir::LogicalResult
 insertMergeBlocks(mlir::Region &r, mlir::ConversionPatternRewriter &rewriter);
 
 std::unique_ptr<mlir::Pass> createInsertMergeBlocksPass();
-
-// Returns true if the region is into maximal SSA form i.e., if all the values
-// within the region are in maximal SSA form.
-bool isRegionSSAMaximized(Region &region);
-
-std::unique_ptr<mlir::Pass> createMaximizeSSAPass();
 
 } // namespace circt
 

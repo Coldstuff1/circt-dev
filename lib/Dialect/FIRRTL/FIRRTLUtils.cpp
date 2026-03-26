@@ -13,6 +13,8 @@
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/InnerSymbolNamespace.h"
+#include "circt/Dialect/Seq/SeqTypes.h"
+#include "circt/Support/Naming.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -43,6 +45,12 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
       builder.create<RefDefineOp>(dst, src);
     } else // Other types, give up and leave a connect
       builder.create<ConnectOp>(dst, src);
+    return;
+  }
+
+  // More special connects
+  if (isa<AnalogType>(dstType)) {
+    builder.create<AttachOp>(ArrayRef{dst, src});
     return;
   }
 
@@ -472,54 +480,49 @@ bool circt::firrtl::walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
 // FieldRef helpers
 //===----------------------------------------------------------------------===//
 
-FieldRef circt::firrtl::getFieldRefFromValue(Value value) {
-  // This code walks upwards from the subfield and calculates the field ID at
-  // each level. At each stage, it must take the current id, and re-index it as
-  // a nested bundle under the parent field.. This is accomplished by using the
-  // parent field's ID as a base, and adding the field ID of the child.
+/// Get the delta indexing from a value, as a FieldRef.
+FieldRef circt::firrtl::getDeltaRef(Value value, bool lookThroughCasts) {
+  // Handle bad input.
+  if (LLVM_UNLIKELY(!value))
+    return FieldRef();
+
+  // Block arguments are not index results, empty delta.
+  auto *op = value.getDefiningOp();
+  if (!op)
+    return FieldRef();
+
+  // Otherwise, optionally look through casts (delta of 0),
+  // dispatch to index operations' getAccesssedField(),
+  // or return no delta.
+  return TypeSwitch<Operation *, FieldRef>(op)
+      .Case<RefCastOp, ConstCastOp, UninferredResetCastOp>(
+          [lookThroughCasts](auto op) {
+            if (!lookThroughCasts)
+              return FieldRef();
+            return FieldRef(op.getInput(), 0);
+          })
+      .Case<SubfieldOp, OpenSubfieldOp, SubindexOp, OpenSubindexOp, RefSubOp,
+            ObjectSubfieldOp>(
+          [](auto subOp) { return subOp.getAccessedField(); })
+      .Default(FieldRef());
+}
+
+FieldRef circt::firrtl::getFieldRefFromValue(Value value,
+                                             bool lookThroughCasts) {
+  if (LLVM_UNLIKELY(!value))
+    return {value, 0};
+
+  // Walk through indexing operations, and optionally through casts.
   unsigned id = 0;
-  while (value) {
-    Operation *op = value.getDefiningOp();
-
-    // If this is a block argument, we are done.
-    if (!op)
-      break;
-
-    auto handled =
-        TypeSwitch<Operation *, bool>(op)
-            .Case<SubfieldOp, OpenSubfieldOp>([&](auto subfieldOp) {
-              value = subfieldOp.getInput();
-              typename decltype(subfieldOp)::InputType bundleType =
-                  subfieldOp.getInput().getType();
-              // Rebase the current index on the parent field's
-              // index.
-              id += bundleType.getFieldID(subfieldOp.getFieldIndex());
-              return true;
-            })
-            .Case<SubindexOp, OpenSubindexOp>([&](auto subindexOp) {
-              value = subindexOp.getInput();
-              typename decltype(subindexOp)::InputType vecType =
-                  subindexOp.getInput().getType();
-              // Rebase the current index on the parent field's
-              // index.
-              id += vecType.getFieldID(subindexOp.getIndex());
-              return true;
-            })
-            .Case<RefSubOp>([&](RefSubOp refSubOp) {
-              value = refSubOp.getInput();
-              auto refInputType = refSubOp.getInput().getType();
-              id += FIRRTLTypeSwitch<FIRRTLBaseType, size_t>(
-                        refInputType.getType())
-                        .Case<FVectorType, BundleType>([&](auto type) {
-                          return type.getFieldID(refSubOp.getIndex());
-                        });
-              return true;
-            })
-            .Default(false);
-    if (!handled)
-      break;
+  while (true) {
+    auto deltaRef = getDeltaRef(value, lookThroughCasts);
+    if (!deltaRef)
+      return {value, id};
+    // Update total fieldID.
+    id = deltaRef.getSubField(id).getFieldID();
+    // Chase to next value.
+    value = deltaRef.getValue();
   }
-  return {value, id};
 }
 
 /// Get the string name of a value which is a direct child of a declaration op.
@@ -538,6 +541,10 @@ static void getDeclName(Value value, SmallString<64> &string, bool nameSafe) {
 
     auto *op = value.getDefiningOp();
     TypeSwitch<Operation *>(op)
+        .Case<ObjectOp>([&](ObjectOp op) {
+          string += op.getInstanceName();
+          value = nullptr;
+        })
         .Case<InstanceOp, MemOp>([&](auto op) {
           string += op.getName();
           string += nameSafe ? "_" : ".";
@@ -593,7 +600,26 @@ circt::firrtl::getFieldName(const FieldRef &fieldRef, bool nameSafe) {
       // Recurse in to the element type.
       type = element.type;
       localID = localID - bundleType.getFieldID(index);
+    } else if (auto bundleType = type_dyn_cast<OpenBundleType>(type)) {
+      auto index = bundleType.getIndexForFieldID(localID);
+      // Add the current field string, and recurse into a subfield.
+      auto &element = bundleType.getElements()[index];
+      if (!name.empty())
+        name += nameSafe ? "_" : ".";
+      name += element.name.getValue();
+      // Recurse in to the element type.
+      type = element.type;
+      localID = localID - bundleType.getFieldID(index);
     } else if (auto vecType = type_dyn_cast<FVectorType>(type)) {
+      auto index = vecType.getIndexForFieldID(localID);
+      name += nameSafe ? "_" : "[";
+      name += std::to_string(index);
+      if (!nameSafe)
+        name += "]";
+      // Recurse in to the element type.
+      type = vecType.getElementType();
+      localID = localID - vecType.getFieldID(index);
+    } else if (auto vecType = type_dyn_cast<OpenVectorType>(type)) {
       auto index = vecType.getIndexForFieldID(localID);
       name += nameSafe ? "_" : "[";
       name += std::to_string(index);
@@ -609,6 +635,13 @@ circt::firrtl::getFieldName(const FieldRef &fieldRef, bool nameSafe) {
       name += element.name.getValue();
       type = element.type;
       localID = localID - enumType.getFieldID(index);
+    } else if (auto classType = type_dyn_cast<ClassType>(type)) {
+      auto index = classType.getIndexForFieldID(localID);
+      auto &element = classType.getElement(index);
+      name += nameSafe ? "_" : ".";
+      name += element.name.getValue();
+      type = element.type;
+      localID = localID - classType.getFieldID(index);
     } else {
       // If we reach here, the field ref is pointing inside some aggregate type
       // that isn't a bundle or a vector. If the type is a ground type, then the
@@ -663,10 +696,10 @@ Value circt::firrtl::getValueByFieldID(ImplicitLocOpBuilder builder,
 
 /// Walk leaf ground types in the `firrtlType` and apply the function `fn`.
 /// The first argument of `fn` is field ID, and the second argument is a
-/// leaf ground type.
+/// leaf ground type and the third argument is a bool to indicate flip.
 void circt::firrtl::walkGroundTypes(
     FIRRTLType firrtlType,
-    llvm::function_ref<void(uint64_t, FIRRTLBaseType)> fn) {
+    llvm::function_ref<void(uint64_t, FIRRTLBaseType, bool)> fn) {
   auto type = getBaseType(firrtlType);
 
   // If this is not a base type, return.
@@ -675,36 +708,48 @@ void circt::firrtl::walkGroundTypes(
 
   // If this is a ground type, don't call recursive functions.
   if (type.isGround())
-    return fn(0, type);
+    return fn(0, type, false);
 
   uint64_t fieldID = 0;
-  auto recurse = [&](auto &&f, FIRRTLBaseType type) -> void {
+  auto recurse = [&](auto &&f, FIRRTLBaseType type, bool isFlip) -> void {
     FIRRTLTypeSwitch<FIRRTLBaseType>(type)
         .Case<BundleType>([&](BundleType bundle) {
           for (size_t i = 0, e = bundle.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, bundle.getElementType(i));
+            f(f, bundle.getElementType(i),
+              isFlip ^ bundle.getElement(i).isFlip);
           }
         })
         .template Case<FVectorType>([&](FVectorType vector) {
           for (size_t i = 0, e = vector.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, vector.getElementType());
+            f(f, vector.getElementType(), isFlip);
           }
         })
         .template Case<FEnumType>([&](FEnumType fenum) {
           for (size_t i = 0, e = fenum.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, fenum.getElementType(i));
+            f(f, fenum.getElementType(i), isFlip);
           }
         })
         .Default([&](FIRRTLBaseType groundType) {
           assert(groundType.isGround() &&
                  "only ground types are expected here");
-          fn(fieldID, groundType);
+          fn(fieldID, groundType, isFlip);
         });
   };
-  recurse(recurse, type);
+  recurse(recurse, type, false);
+}
+
+/// Return the inner sym target for the specified value and fieldID.
+/// If root is a blockargument, this must be FModuleLike.
+hw::InnerSymTarget circt::firrtl::getTargetFor(FieldRef ref) {
+  auto root = ref.getValue();
+  if (auto arg = dyn_cast<BlockArgument>(root)) {
+    auto mod = cast<FModuleLike>(arg.getOwner()->getParentOp());
+    return hw::InnerSymTarget(arg.getArgNumber(), mod, ref.getFieldID());
+  }
+  return hw::InnerSymTarget(root.getDefiningOp(), ref.getFieldID());
 }
 
 // Return InnerSymAttr with sym on specified fieldID.
@@ -792,7 +837,7 @@ circt::firrtl::maybeStringToLocation(StringRef spelling, bool skipParsing,
                                      FileLineColLoc &fileLineColLocCache,
                                      MLIRContext *context) {
   // The spelling of the token looks something like "@[Decoupled.scala 221:8]".
-  if (!spelling.startswith("@[") || !spelling.endswith("]"))
+  if (!spelling.starts_with("@[") || !spelling.ends_with("]"))
     return {false, std::nullopt};
 
   spelling = spelling.drop_front(2).drop_back(1);
@@ -969,6 +1014,8 @@ Type circt::firrtl::lowerType(
         {StringAttr::get(type.getContext(), "body"), bodyTy}};
     return hw::StructType::get(type.getContext(), fields);
   }
+  if (type_isa<ClockType>(firType))
+    return seq::ClockType::get(firType.getContext());
 
   auto width = firType.getBitWidthOrSentinel();
   if (width >= 0) // IntType, analog with known width, clock, etc.

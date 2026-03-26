@@ -20,11 +20,19 @@ def ESI_Dialect : Dialect {
 
   let hasConstantMaterializer = 1;
   let useDefaultTypePrinterParser = 1;
+  let useDefaultAttributePrinterParser = 1;
 
   let extraClassDeclaration = [{
+    /// Register all ESI attributes.
+    void registerAttributes();
     /// Register all ESI types.
     void registerTypes();
   }];
+
+  let dependentDialects = [
+    "circt::seq::SeqDialect", "circt::hw::HWDialect", "circt::sv::SVDialect",
+    "circt::comb::CombDialect"
+  ];
 }
 
 class ESI_Op<string mnemonic, list<Trait> traits = []> :
@@ -42,5 +50,11 @@ class ESI_Physical_Op<string mnemonic, list<Trait> traits = []> :
     ESI_Op<mnemonic, traits>;
 
 class ESI_Type<string name> : TypeDef<ESI_Dialect, name> { }
+
+class ESI_Attr<string name, list<Trait> traits = [],
+                string baseCppClass = "::mlir::Attribute">
+    : AttrDef<ESI_Dialect, name, traits, baseCppClass> {
+  let mnemonic = ?;
+}
 
 #endif // CIRCT_DIALECT_ESI_DIALECT_TD

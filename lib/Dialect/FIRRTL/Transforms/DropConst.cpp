@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PassDetails.h"
+#include "circt/Dialect/FIRRTL/FIRRTLInstanceGraph.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
@@ -34,7 +35,8 @@ static Type convertType(Type type) {
 
   if (auto refType = type_dyn_cast<RefType>(type)) {
     if (auto converted = convertType(refType.getType()))
-      return RefType::get(converted, refType.getForceable());
+      return RefType::get(converted, refType.getForceable(),
+                          refType.getLayer());
   }
 
   return {};
@@ -85,6 +87,8 @@ class DropConstPass : public DropConstBase<DropConstPass> {
             module->setAttr(FModuleLike::getPortTypesAttrName(),
                             ArrayAttr::get(module.getContext(), portTypes));
         });
+
+    markAnalysesPreserved<InstanceGraph>();
   }
 };
 } // namespace
