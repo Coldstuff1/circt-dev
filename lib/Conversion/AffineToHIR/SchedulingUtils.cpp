@@ -206,7 +206,7 @@ bool ArithOpInfo::isConstant() {
 ILPSolver::ILPSolver(const char *name, llvm::raw_ostream &logger)
     : MPSolver(
           name,
-          MPSolver::OptimizationProblemType::SCIP_MIXED_INTEGER_PROGRAMMING),
+          MPSolver::OptimizationProblemType::CBC_MIXED_INTEGER_PROGRAMMING),
       logger(logger), solved(false) {}
 
 void ILPSolver::dump() {
@@ -296,7 +296,7 @@ ILPSolver::getOrAddRemainder(operations_research::MPVariable *var,
   if (mapVarToRemainder[key] != NULL)
     return mapVarToRemainder[key];
 
-  auto *constr = this->MakeRowConstraint(0, 0, "remainder");
+  auto *constr = this->MakeRowConstraint(0, 0, name + "_rem");
   auto *quotient = this->MakeIntVar(0, infinity(), name + "_q");
   auto *remainder = this->MakeIntVar(0, divisor - 1, name);
   addCoeff(constr, quotient, divisor);
@@ -312,7 +312,7 @@ MPVariable *ILPSolver::getOrAddSum(
 
     return mapVarsToSum[vars];
 
-  auto *constr = this->MakeRowConstraint(0, 0, "sum");
+  auto *constr = this->MakeRowConstraint(0, 0, name + "_sum");
   double lb = 0;
   double ub = 0;
   for (auto *var : vars) {
@@ -334,7 +334,7 @@ MPVariable *ILPSolver::addConditionalGTE(operations_research::MPVariable *lhs,
   auto *b = this->MakeBoolVar(name);
 
   // lhs - rhs >= lb - m + m*b
-  auto *constr = this->MakeRowConstraint(lb - m, infinity(), "conditional-gte");
+  auto *constr = this->MakeRowConstraint(lb - m, infinity(), name + "_cgte");
   addCoeff(constr, lhs, 1);
   addCoeff(constr, rhs, -1);
   addCoeff(constr, b, -m);
@@ -560,7 +560,7 @@ Scheduler::getOrAddTotalTimeOffset(Operation *operation, std ::string name) {
         this->getOrAddTimeOffset(op, "t" + to_string(this->varNum++)));
   }
   auto *out = this->getOrAddSum(timeOffsets, name);
-  auto *constr = this->MakeRowConstraint(0, infinity(), "tmax-constr");
+  auto *constr = this->MakeRowConstraint(0, infinity(), name + "_tmax");
   constr->SetCoefficient(this->tmax, 1);
   constr->SetCoefficient(out, -1);
   return out;
@@ -589,7 +589,7 @@ std::optional<int64_t> Scheduler::getResourceAllocation(Operation *op,
 void Scheduler::addDependence(Dependence dep) {
   // dest_time_offset - src_time_offset > delay.
   // delay can be -ve `dep` is a loop-carried dependence.
-  auto *constr = this->MakeRowConstraint(dep.delay, infinity(), dep.name);
+  auto *constr = this->MakeRowConstraint(dep.delay, infinity(), dep.name + "_" + to_string(this->varNum++));
 
   // Add the time offsets of the dest op and all the enclosing regions to get
   // the total dest op time offset.
@@ -641,7 +641,7 @@ void Scheduler::addConflict(Conflict conflict) {
   auto *b5 =
       this->addConditionalGTE(r2, r1, 1, m, "b5_" + to_string(this->varNum));
 
-  auto *constr = this->MakeRowConstraint(1, 1, "bank-conflict");
+  auto *constr = this->MakeRowConstraint(1, 1, "bank-conflict_" + to_string(this->varNum++));
   addCoeff(constr, b1, 1);
   addCoeff(constr, b2, 1);
   addCoeff(constr, b3, 1);
