@@ -16,6 +16,85 @@
 include "mlir/Pass/PassBase.td"
 
 //===----------------------------------------------------------------------===//
+// GenCosimFiles
+//===----------------------------------------------------------------------===//
+
+def GenCosimFiles : Pass<"gen-cosim-files","mlir::ModuleOp"> {
+  let summary = "Generate mlir and json files for cosimulation.";
+  let constructor = "circt::createGenCosimFilesPass()";
+  let dependentDialects = [
+    "circt::hir::HIRDialect",
+  ];
+  let options = [
+    Option<"dir", "dir", "std::string",
+            "", "Output directory.">,
+    Option<"entry", "entry", "std::string",
+            "", "Entry function.">
+   ];
+
+}
+
+//===----------------------------------------------------------------------===//
+// HIRPragma
+//===----------------------------------------------------------------------===//
+
+def HIRPragma : Pass<"hir-pragma","mlir::ModuleOp"> {
+  let summary = "Convert HLS pragma attrs from polygeist to hir specific attributes.";
+  let constructor = "circt::createHIRPragmaPass()";
+  let dependentDialects = [
+    "circt::hir::HIRDialect",
+  ];
+  let options = [
+    Option<"topLevelFuncName", "function", "std::string",
+            "", "Top level function to convert to hir dialect.">
+   ];
+
+}
+
+//===----------------------------------------------------------------------===//
+// AutoAffineToHIR
+//===----------------------------------------------------------------------===//
+
+def AutoAffineToHIR : Pass<"auto-affine-to-hir","mlir::ModuleOp"> {
+  let summary = "Convert Affine dialect to HIR dialect with autotuning.";
+  let description = [{
+    This pass converts affine dialect to hir while calculating initiation
+    interval and schedule for improved op fusion.
+  }];
+  let constructor = "circt::createAutoAffineToHIRPass()";
+  let dependentDialects = [
+    "circt::hir::HIRDialect",
+    "circt::hw::HWDialect",
+    "circt::comb::CombDialect"
+  ];
+  let options = [
+    Option<"dbg", "dbg", "bool","", "Enable debug print to stdout.">
+   ];
+}
+
+
+//===----------------------------------------------------------------------===//
+// AffineToHIR
+//===----------------------------------------------------------------------===//
+
+def AffineToHIR : Pass<"affine-to-hir","mlir::ModuleOp"> {
+  let summary = "Convert Affine dialect to HIR dialect.";
+  let description = [{
+    This pass analyzes Affine loops and control flow, creates a Scheduling
+    problem and solves it using ILP solver and lowers it to HIR.
+  }];
+  let constructor = "circt::createAffineToHIR()";
+  let dependentDialects = [
+    "circt::hir::HIRDialect",
+    "circt::hw::HWDialect",
+    "circt::comb::CombDialect"
+  ];
+  let options = [
+    Option<"dbg", "dbg", "bool","", "Enable debug print to stdout.">
+   ];
+}
+
+//===----------------------------------------------------------------------===//
 // AffineToPipeline
 //===----------------------------------------------------------------------===//
 

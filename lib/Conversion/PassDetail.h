@@ -80,6 +80,10 @@ namespace esi {
 class ESIDialect;
 } // namespace esi
 
+namespace hir {
+class HIRDialect;
+}
+
 namespace moore {
 class MooreDialect;
 } // namespace moore

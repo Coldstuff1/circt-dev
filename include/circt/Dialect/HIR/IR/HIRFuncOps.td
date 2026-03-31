@@ -1,5 +1,5 @@
 include "mlir/IR/SymbolInterfaces.td"
-include "mlir/IR/FunctionInterfaces.td"
+include "mlir/Interfaces/FunctionInterfaces.td"
 include "mlir/Interfaces/CallInterfaces.td"
 
 def FuncOp : HIR_Op<"func", 

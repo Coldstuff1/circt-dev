@@ -17,6 +17,7 @@ set(LLVM_OPTIONAL_SOURCES
   SV.cpp
   Seq.cpp
   Verif.cpp
+  HIR.cpp
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIComb
@@ -171,4 +172,12 @@ add_mlir_public_c_api_library(CIRCTCAPILTL
   LINK_LIBS PUBLIC
   MLIRCAPIIR
   CIRCTLTL
+)
+
+add_mlir_public_c_api_library(CIRCTCAPIHIR
+  HIR.cpp
+  
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTHIR
 )
