@@ -11,6 +11,8 @@ add_circt_tool(circt-opt
 llvm_update_compile_flags(circt-opt)
 target_link_libraries(circt-opt
   PRIVATE
+  CIRCTAffineToHIR
+  CIRCTHIRCosim
   CIRCTAffineToLoopSchedule
   CIRCTAnalysisTestPasses
   CIRCTArc
@@ -41,6 +43,9 @@ target_link_libraries(circt-opt
   CIRCTHandshakeToDC
   CIRCTHandshakeToHW
   CIRCTHandshakeTransforms
+  CIRCTHIR
+  CIRCTHIRTransforms
+  CIRCTHIRToHW
   CIRCTLLHD
   CIRCTLLHDToLLVM
   CIRCTHWToLLVM

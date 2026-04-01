@@ -21,7 +21,7 @@ public:
 } // end anonymous namespace
 
 LogicalResult unrollLoopFull(hir::ForOp forOp) {
-  Block &loopBodyBlock = forOp.getLoopBody().front();
+  Block &loopBodyBlock = forOp.getBody().front();
   // auto builder = OpBuilder::atBlockTerminator(&loopBodyBlock);
   auto builder = OpBuilder(forOp);
   builder.setInsertionPointAfter(forOp);

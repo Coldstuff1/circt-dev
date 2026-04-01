@@ -72,6 +72,20 @@ def AutoAffineToHIR : Pass<"auto-affine-to-hir","mlir::ModuleOp"> {
    ];
 }
 
+//===----------------------------------------------------------------------===//
+// HIRToHW
+//===----------------------------------------------------------------------===//
+
+def HIRToHW : Pass<"hir-to-hw", "mlir::ModuleOp"> {
+  let summary = "Convert HIR to HW + Comb + SV dialect";
+  let description = [{
+    Convert an HIR module to HW, Comb and SV dialect.
+  }];
+
+  let constructor = "circt::createHIRToHWPass()";
+  let dependentDialects = ["comb::CombDialect", "hw::HWDialect",
+                           "sv::SVDialect"];
+}
 
 //===----------------------------------------------------------------------===//
 // AffineToHIR

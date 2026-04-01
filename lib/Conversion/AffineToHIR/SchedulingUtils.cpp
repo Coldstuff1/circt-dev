@@ -43,7 +43,7 @@ static std::optional<std::tuple<int, int, int>>
 getConstantBounds(affine::AffineForOp op) {
   int lb = op.getLowerBound().getMap().getSingleConstantResult();
   int ub = op.getUpperBound().getMap().getSingleConstantResult();
-  int step = op.getStep();
+  int step = op.getStep().getSExtValue();
   return std::make_tuple(lb, ub, step);
 }
 static std::optional<std::tuple<int, int, int>> getConstantBounds(Value iv) {
@@ -275,8 +275,8 @@ void ILPSolver::dump() {
 std::pair<MPVariable *, MPVariable *>
 ILPSolver::addBoundedILPVar(double lb, double ub, int64_t step,
                             std::string &name) {
-  assert(-infinity() < lb < infinity());
-  assert(-infinity() < ub < infinity());
+  assert(-infinity() < lb && lb < infinity());
+  assert(-infinity() < ub && ub < infinity());
   assert(step != 0);
   auto *ilpVar = this->MakeIntVar(lb, ub, name);
   MPVariable *canonicalVar = ilpVar;
@@ -498,6 +498,7 @@ void MemoryDependenceILP::addMemoryConstraints() {
       auto idx = srcIndices[i];
       auto coeff = src.getIdxCoeff(idx, dim);
       auto bounds = getConstantBounds(idx);
+      (void)bounds;
       auto *var = getOrAddBoundedILPSrcVar("s" + to_string(i), idx);
       addCoeff(constr, var, -coeff);
     }

@@ -153,7 +153,7 @@ Block *ForOp::addEntryBlock(MLIRContext *context, Type inductionVarTy) {
   entry->addArgument(inductionVarTy, builder.getUnknownLoc()); // induction var
   entry->addArgument(hir::TimeType::get(context),
                      builder.getUnknownLoc()); // iter time
-  getLoopBody().push_back(entry);
+  getBody().push_back(entry);
   return entry;
 }
 
@@ -205,6 +205,8 @@ SmallVector<Value> ForOp::getIterArgArguments() {
     iterArgs.push_back(getBody().getArgument(i));
   return iterArgs;
 }
+
+SmallVector<Region *> ForOp::getLoopRegions() { return {&getBody()}; }
 
 Value ForOp::getIterTimeVar() { return getBody().getArguments().back(); }
 StringRef ForOp::getInductionVarName() {

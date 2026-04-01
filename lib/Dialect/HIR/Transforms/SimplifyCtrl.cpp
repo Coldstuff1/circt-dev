@@ -108,7 +108,7 @@ LogicalResult SimplifyCtrlPass::visitOp(ForOp forOp) {
   operandMap.map(forOp.getIterTimeVar(), whileOp.getIterTimeVar());
 
   // Copy the loop body.
-  for (auto &operation : forOp.getLoopBody().front()) {
+  for (auto &operation : forOp.getBody().front()) {
     if (auto nextIterOp = dyn_cast<hir::NextIterOp>(operation)) {
       SmallVector<Value> mappedIterArgs;
       for (auto iterArg : nextIterOp.getIterArgs()) {

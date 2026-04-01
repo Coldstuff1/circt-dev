@@ -452,7 +452,7 @@ LogicalResult HIRPragma::visitOp(mlir::affine::AffineForOp op) {
   OpBuilder builder(op);
   auto lb = op.getLowerBound().getMap().getSingleConstantResult();
   auto ub = op.getUpperBound().getMap().getSingleConstantResult();
-  auto step = op.getStep();
+  auto step = op.getStep().getSExtValue();
   if (ub < lb + step)
     return op.emitError("The for loop must have atleast one iteration.");
   return success();

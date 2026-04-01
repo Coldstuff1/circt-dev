@@ -1,6 +1,6 @@
 #include "circt/Dialect/HIR/IR/HIROpSyntax.h"
 #include "circt/Dialect/HIR/IR/helper.h"
-#include <mlir/IR/FunctionImplementation.h>
+#include <mlir/Interfaces/FunctionImplementation.h>
 #define min(x, y) x > y ? x : y
 //------------------------------------------------------------------------------
 //---------------------------- Helper functions --------------------------------
@@ -721,8 +721,6 @@ void ForOp::print(OpAsmPrinter &printer) {
   printWithSSANames(printer, this->getOperation(),
                     this->getOperation()->getAttrDictionary());
 }
-
-Region &ForOp::getLoopBody() { return getBody(); }
 
 /// FuncOp
 /// Example:

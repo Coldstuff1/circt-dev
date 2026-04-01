@@ -166,7 +166,7 @@ LogicalResult HIRToHWPass::visitOp(hir::BusTensorMapOp op) {
   // Copy the bus map logic as many times as there are elements in the tensor.
   // Save the outputs in the results[array-index][result-number] array.
   SmallVector<SmallVector<Value>> results;
-  for (size_t arrayIdx = 0; arrayIdx < hwArrayTy.getSize(); arrayIdx++) {
+  for (size_t arrayIdx = 0; arrayIdx < hwArrayTy.getNumElements(); arrayIdx++) {
     SmallVector<Value> hwOperands;
     for (auto hwOperandT : hwOperandTensors)
       hwOperands.push_back(
@@ -179,7 +179,7 @@ LogicalResult HIRToHWPass::visitOp(hir::BusTensorMapOp op) {
   // elements.
   for (size_t resultNum = 0; resultNum < op.getNumResults(); resultNum++) {
     SmallVector<Value> resultElements;
-    for (size_t arrayIdx = 0; arrayIdx < hwArrayTy.getSize(); arrayIdx++)
+    for (size_t arrayIdx = 0; arrayIdx < hwArrayTy.getNumElements(); arrayIdx++)
       resultElements.push_back(results[arrayIdx][resultNum]);
     mapHIRToHWValue.map(
         op.getResult(resultNum),
@@ -796,7 +796,7 @@ LogicalResult HIRToHWPass::visitOperation(Operation *operation) {
 }
 
 void HIRToHWPass::runOnOperation() {
-  this->mlirModuleOp = getOperation();
+  this->mlirModuleOp = cast<mlir::ModuleOp>(getOperation());
   this->builder = OpBuilder(mlirModuleOp.getLoc().getContext());
   this->builder->setInsertionPointToStart(mlirModuleOp.getBody(0));
   WalkResult const result =
@@ -818,7 +818,7 @@ void HIRToHWPass::runOnOperation() {
 
   // erase unnecessary ops.
   SmallVector<Operation *> opsToErase;
-  for (auto &operation : getOperation()) {
+  for (auto &operation : mlirModuleOp.getOps()) {
     if (!isa<hw::HWDialect, sv::SVDialect, comb::CombDialect>(
             operation.getDialect()))
       opsToErase.push_back(&operation);

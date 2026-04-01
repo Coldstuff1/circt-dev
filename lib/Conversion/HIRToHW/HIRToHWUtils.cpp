@@ -143,7 +143,7 @@ getConstantXArray(OpBuilder &builder, Type hirTy,
     return constantX(builder, hwTy);
   }
   SmallVector<Value> constXCopies;
-  for (uint64_t i = 0; i < hwArrayTy.getSize(); i++) {
+  for (uint64_t i = 0; i < hwArrayTy.getNumElements(); i++) {
     Value const constXValue =
         constantX(builder, hir::BusType::get(builder.getContext(),
                                              hwArrayTy.getElementType()))
@@ -305,10 +305,10 @@ Value insertConstArrayGetLogic(OpBuilder &builder, Value arr, int idx) {
   auto uLoc = builder.getUnknownLoc();
   auto arrayTy = arr.getType().dyn_cast<hw::ArrayType>();
   assert(arrayTy);
-  assert(arrayTy.getSize() > 1);
+  assert(arrayTy.getNumElements() > 1);
   auto cIdx = builder.create<hw::ConstantOp>(
       uLoc, IntegerAttr::get(
-                builder.getIntegerType(helper::clog2(arrayTy.getSize())), idx));
+                builder.getIntegerType(helper::clog2(arrayTy.getNumElements())), idx));
   return builder.create<hw::ArrayGetOp>(uLoc, arr, cIdx);
 }
 

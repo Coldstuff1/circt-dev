@@ -435,11 +435,11 @@ LogicalResult ForOp::verify() {
   if (!this->getIterTimeVar().getType().isa<hir::TimeType>())
     return this->emitError("Expected time var to be of !hir.time type.");
   auto nextIterOp =
-      dyn_cast<hir::NextIterOp>(this->getLoopBody().front().getTerminator());
+      dyn_cast<hir::NextIterOp>(this->getBody().front().getTerminator());
   if (nextIterOp.getIterArgs().size() != this->getIterArgs().size())
     return nextIterOp.emitError(
         "Mismatch in number of iter args with the enclosing ForOp.");
-  if (failed(checkRegionCaptures(this->getLoopBody())))
+  if (failed(checkRegionCaptures(this->getBody())))
     return failure();
 
   return success();
@@ -480,7 +480,7 @@ LogicalResult ProbeOp::verify() {
         ty.isa<mlir::IndexType, hir::TimeType>() || helper::isBusLikeType(ty)))
     return this->emitError() << "Unsupported type for hir.probe.";
   if (this->getVerilogName().empty() ||
-      this->getVerilogName().startswith("%") ||
+      this->getVerilogName().starts_with("%") ||
       isdigit(this->getVerilogName().data()[0]))
     return this->emitError() << "Invalid name.";
   return success();

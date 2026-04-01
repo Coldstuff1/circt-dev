@@ -358,7 +358,8 @@ LogicalResult AffineToHIRImpl::visitOp(mlir::affine::AffineForOp op) {
       builder.getI64IntegerAttr(
           op.getUpperBound().getMap().getSingleConstantResult()));
   auto step = builder.create<circt::hw::ConstantOp>(
-      builder.getUnknownLoc(), builder.getI64IntegerAttr(originalStep));
+      builder.getUnknownLoc(),
+      builder.getI64IntegerAttr(originalStep.getSExtValue()));
 
   Value tRegion = builder.getInsertionBlock()->getArguments().back();
 
@@ -419,7 +420,7 @@ LogicalResult AffineToHIRImpl::visitOp(mlir::affine::AffineForOp op) {
       op.getInductionVar(),
       HIRValue(forOp.getInductionVar(), forOp.getIterTimeVar(), 0),
       forOpBodyBlk);
-  pushInsertionBlk(forOp.getLoopBody().front());
+  pushInsertionBlk(forOp.getBody().front());
   return success();
 }
 

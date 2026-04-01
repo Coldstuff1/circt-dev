@@ -55,7 +55,7 @@ struct HIRInlinerInterface : public mlir::DialectInlinerInterface {
     return true;
   }
   void handleTerminator(Operation *op,
-                        ArrayRef<Value> valuesToRepl) const final {
+                        ValueRange valuesToRepl) const final {
     // Only "hir.yield" needs to be handled here.
     auto returnOp = cast<hir::ReturnOp>(op);
     assert(returnOp);
