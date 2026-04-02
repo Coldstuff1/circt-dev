@@ -1,4 +1,5 @@
 add_subdirectory(AffineToHIR)
+add_subdirectory(AffineToHIRPrep)
 add_subdirectory(AffineToLoopSchedule)
 add_subdirectory(ArcToLLVM)
 add_subdirectory(CalyxToFSM)

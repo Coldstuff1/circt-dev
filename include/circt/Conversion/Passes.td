@@ -91,6 +91,21 @@ def HIRToHW : Pass<"hir-to-hw", "mlir::ModuleOp"> {
 // AffineToHIR
 //===----------------------------------------------------------------------===//
 
+def AffineToHIRPrep : Pass<"affine-to-hir-prep", "mlir::ModuleOp"> {
+  let summary = "Prepare Affine dialect for HIR conversion.";
+  let description = [{
+    This pass translates loop attributes, register allocations, and math delays
+    from HLS annotations into the required HIR format before further processing.
+  }];
+  let constructor = "circt::createAffineToHIRPrepPass()";
+  let dependentDialects = [
+    "circt::hir::HIRDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def AffineToHIR : Pass<"affine-to-hir","mlir::ModuleOp"> {
   let summary = "Convert Affine dialect to HIR dialect.";
   let description = [{

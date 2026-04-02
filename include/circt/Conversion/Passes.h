@@ -14,6 +14,7 @@
 #define CIRCT_CONVERSION_PASSES_H
 
 #include "circt/Conversion/AffineToHIR.h"
+#include "circt/Conversion/AffineToHIRPrep.h"
 #include "circt/Conversion/AffineToLoopSchedule.h"
 #include "circt/Conversion/ArcToLLVM.h"
 #include "circt/Conversion/AutoAffineToHIRPass.h"

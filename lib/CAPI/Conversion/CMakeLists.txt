@@ -5,6 +5,7 @@ add_mlir_public_c_api_library(CIRCTCAPIConversion
   CIRCTAffineToLoopSchedule
   CIRCTArcToLLVM
   CIRCTAffineToHIR
+  CIRCTAffineToHIRPrep
   CIRCTHIRToHW
   CIRCTCalyxToFSM
   CIRCTCalyxToHW
