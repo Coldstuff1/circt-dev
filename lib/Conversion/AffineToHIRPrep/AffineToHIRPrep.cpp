@@ -303,6 +303,34 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
         }
       });
     });
+
+    // =========================================================================
+    // Step 3: Hoist external func.func declarations to the top of the module.
+    // =========================================================================
+    // AffineToHIR's Phase 1 pre-converts declarations to hir::FuncExternOp in
+    // module order. By hoisting them before any hwAccel func, we guarantee that
+    // scheduling analysis can resolve func.call callees regardless of the order
+    // Polygeist happened to emit them.
+    Block &moduleBody = module.getBodyRegion().front();
+    // Find the first non-external func (insertion target).
+    Operation *insertBefore = nullptr;
+    for (auto &op : moduleBody) {
+      if (auto func = dyn_cast<func::FuncOp>(&op)) {
+        if (!func.isExternal()) {
+          insertBefore = &op;
+          break;
+        }
+      }
+    }
+    if (insertBefore) {
+      SmallVector<func::FuncOp> externalFuncs;
+      moduleBody.walk([&](func::FuncOp func) {
+        if (func.isExternal())
+          externalFuncs.push_back(func);
+      });
+      for (auto func : externalFuncs)
+        func->moveBefore(insertBefore);
+    }
   }
 };
 
