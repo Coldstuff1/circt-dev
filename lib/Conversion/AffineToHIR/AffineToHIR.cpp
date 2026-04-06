@@ -674,6 +674,23 @@ void AffineToHIRImpl::runOnOperation() {
   if (this->dbg)
     logFile = "/dev/stdout";
 
+  // Phase 1: Pre-convert all func.func declarations to hir::FuncExternOp.
+  // This must happen before the scheduler runs on hwAccel funcs because
+  // HIRScheduler::insertSSADependencies resolves func.call callees as
+  // hir::FuncExternOp symbols.
+  SmallVector<func::FuncOp> externalDecls;
+  getOperation().walk(
+      [&](func::FuncOp funcOp) {
+        if (funcOp.isDeclaration())
+          externalDecls.push_back(funcOp);
+      });
+  for (auto funcOp : externalDecls) {
+    if (failed(visitOp(funcOp)))
+      return; // visitOp emits the error
+    funcOp->erase();
+  }
+
+  // Phase 2: Process hwAccel funcs with scheduler + conversion.
   getOperation().walk([this, logFile](Operation *operation) {
     if (auto funcOp = dyn_cast<mlir::func::FuncOp>(operation)) {
       auto funcScheduler =

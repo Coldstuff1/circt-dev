@@ -90,21 +90,16 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
         }
       }
 
-      // Fix argNames: preserve existing names and append "t" for the time arg.
-      // The existing argNames from Polygeist may already have the real names
-      // (e.g. ["a", "b"]); we keep them and just append "t".
-      SmallVector<Attribute> argNames;
-      if (auto existingNames =
-              func->getAttrOfType<ArrayAttr>("argNames")) {
-        for (auto name : existingNames)
-          argNames.push_back(name);
-      } else {
+      // Preserve existing argNames as-is. AffineToHIR's visitOp() will
+      // append "t" when it builds the hir::FuncExternOp, so we must NOT
+      // pre-append it here (that would cause a size mismatch assertion).
+      if (!func->getAttrOfType<ArrayAttr>("argNames")) {
+        SmallVector<Attribute> argNames;
         for (unsigned i = 0; i < func.getNumArguments(); ++i)
           argNames.push_back(
               builder.getStringAttr("arg" + std::to_string(i)));
+        func->setAttr("argNames", builder.getArrayAttr(argNames));
       }
-      argNames.push_back(builder.getStringAttr("t"));
-      func->setAttr("argNames", builder.getArrayAttr(argNames));
 
       // Set result names to ["out"] for single-result functions.
       if (func.getNumResults() > 0)
