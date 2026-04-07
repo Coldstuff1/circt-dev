@@ -37,6 +37,13 @@ static constexpr llvm::StringLiteral kHlsAttrsToStrip[] = {
     "hls.INTERFACE_PORT",
 };
 
+// bind_storage attribute names to strip after conversion.
+static constexpr llvm::StringLiteral kHlsBindStorageAttrsToStrip[] = {
+    "hls.BIND_STORAGE_IMPL",     "hls.BIND_STORAGE_TYPE",
+    "hls.BIND_STORAGE_VARIABLE", "hls.BIND_STORAGE_RD_LATENCY",
+    "hls.BIND_STORAGE_WR_LATENCY",
+};
+
 /// Given the hir.memref.ports ArrayAttr, return the rd_latency of the first
 /// read port, or -1 if there is none.
 static int64_t getRdLatencyFromPorts(ArrayAttr ports) {
@@ -48,6 +55,19 @@ static int64_t getRdLatencyFromPorts(ArrayAttr ports) {
       continue;
     if (auto rdAttr = portDict.getAs<IntegerAttr>("rd_latency"))
       return rdAttr.getInt();
+  }
+  return -1;
+}
+
+/// Return the zero-based index of the first port dict in `ports` that contains
+/// the named key (e.g. "rd_latency" or "wr_latency").  Returns -1 if not found.
+static int64_t getPortIndex(ArrayAttr ports, StringRef key) {
+  if (!ports)
+    return -1;
+  for (auto [idx, portAttr] : llvm::enumerate(ports)) {
+    auto portDict = portAttr.dyn_cast<DictionaryAttr>();
+    if (portDict && portDict.get(key))
+      return static_cast<int64_t>(idx);
   }
   return -1;
 }
@@ -125,19 +145,26 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
       //     Strip all hls.* and llvm.linkage attrs afterwards.
       // -----------------------------------------------------------------------
       for (unsigned i = 0; i < func.getNumArguments(); ++i) {
-        if (auto wrLatency = func.getArgAttrOfType<IntegerAttr>(
-                i, "hls.INTERFACE_WR_LATENCY")) {
-          DictionaryAttr dict = builder.getDictionaryAttr(
-              {builder.getNamedAttr("wr_latency", wrLatency)});
-          func.setArgAttr(i, "hir.memref.ports", builder.getArrayAttr({dict}));
-        } else if (auto rdLatency = func.getArgAttrOfType<IntegerAttr>(
-                       i, "hls.INTERFACE_RD_LATENCY")) {
-          DictionaryAttr dict = builder.getDictionaryAttr(
-              {builder.getNamedAttr("rd_latency", rdLatency)});
-          func.setArgAttr(i, "hir.memref.ports", builder.getArrayAttr({dict}));
-        } else if (auto latency = func.getArgAttrOfType<IntegerAttr>(
-                       i, "hls.INTERFACE_LATENCY")) {
-          func.setArgAttr(i, "hir.delay", latency);
+        {
+          // Collect rd and wr ports independently so that ram_2p-style args
+          // with both hls.INTERFACE_RD_LATENCY and hls.INTERFACE_WR_LATENCY
+          // receive both entries in hir.memref.ports.
+          SmallVector<Attribute> ports;
+          if (auto rdLatency = func.getArgAttrOfType<IntegerAttr>(
+                  i, "hls.INTERFACE_RD_LATENCY"))
+            ports.push_back(builder.getDictionaryAttr(
+                {builder.getNamedAttr("rd_latency", rdLatency)}));
+          if (auto wrLatency = func.getArgAttrOfType<IntegerAttr>(
+                  i, "hls.INTERFACE_WR_LATENCY"))
+            ports.push_back(builder.getDictionaryAttr(
+                {builder.getNamedAttr("wr_latency", wrLatency)}));
+
+          if (!ports.empty())
+            func.setArgAttr(i, "hir.memref.ports",
+                            builder.getArrayAttr(ports));
+          else if (auto latency = func.getArgAttrOfType<IntegerAttr>(
+                       i, "hls.INTERFACE_LATENCY"))
+            func.setArgAttr(i, "hir.delay", latency);
         }
         // Strip all hls.* attrs from this argument.
         for (auto name : kHlsAttrsToStrip)
@@ -156,7 +183,56 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
       func->setAttr("hwAccel", builder.getUnitAttr());
 
       // -----------------------------------------------------------------------
-      // 2c. Convert scalar memref.alloca (rank-0) to rank-1 memref<1xT>
+      // 2c. Convert bind_storage memref.alloca ops:
+      //     hls.BIND_STORAGE_RD_LATENCY / hls.BIND_STORAGE_WR_LATENCY
+      //       -> hir.memref.ports  (one dict per port)
+      //     hls.BIND_STORAGE_IMPL -> mem_kind
+      //     Strip all hls.BIND_STORAGE_* attrs afterwards.
+      //
+      //     This must run BEFORE step 2d (load annotation) so that
+      //     hir.memref.ports is present when loads are visited.
+      // -----------------------------------------------------------------------
+      func.walk([&](memref::AllocaOp alloca) {
+        // Only process allocas that carry bind_storage annotations.
+        if (!alloca->hasAttr("hls.BIND_STORAGE_RD_LATENCY") &&
+            !alloca->hasAttr("hls.BIND_STORAGE_WR_LATENCY"))
+          return;
+
+        SmallVector<Attribute> ports;
+        if (auto rdAttr = alloca->getAttrOfType<IntegerAttr>(
+                "hls.BIND_STORAGE_RD_LATENCY")) {
+          ports.push_back(builder.getDictionaryAttr(
+              {builder.getNamedAttr("rd_latency", rdAttr)}));
+        }
+        if (auto wrAttr = alloca->getAttrOfType<IntegerAttr>(
+                "hls.BIND_STORAGE_WR_LATENCY")) {
+          ports.push_back(builder.getDictionaryAttr(
+              {builder.getNamedAttr("wr_latency", wrAttr)}));
+        }
+        if (!ports.empty())
+          alloca->setAttr("hir.memref.ports", builder.getArrayAttr(ports));
+
+        // Map impl name to mem_kind string.
+        if (auto implAttr =
+                alloca->getAttrOfType<StringAttr>("hls.BIND_STORAGE_IMPL")) {
+          StringRef impl = implAttr.getValue();
+          StringRef memKind;
+          if (impl == "bram")
+            memKind = "bram";
+          else if (impl == "lutram" || impl == "lut")
+            memKind = "lutram";
+          else
+            memKind = impl; // pass through unknown impls verbatim
+          alloca->setAttr("mem_kind", builder.getStringAttr(memKind));
+        }
+
+        // Strip all raw hls.BIND_STORAGE_* attrs.
+        for (auto name : kHlsBindStorageAttrsToStrip)
+          alloca->removeAttr(name);
+      });
+
+      // -----------------------------------------------------------------------
+      // 2d-scalar. Convert scalar memref.alloca (rank-0) to rank-1 memref<1xT>
       //     with mem_kind="reg" and hir.memref.ports = [{rd_latency=0},
       //     {wr_latency=1}].  Also erase any stores of llvm.mlir.undef
       //     into the new alloca (they are C-level uninitialised scalar vars
@@ -200,6 +276,9 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
               builder.setInsertionPoint(load);
               auto newLoad = builder.create<affine::AffineLoadOp>(
                   load.getLoc(), newAlloca.getResult(), zeroMap, ValueRange{});
+              // Annotate port index for the read port (index 0 in reg ports).
+              newLoad->setAttr("hir.memref_port",
+                               builder.getI64IntegerAttr(0));
               load.replaceAllUsesWith(newLoad.getResult());
               load.erase();
             }
@@ -218,9 +297,12 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
                 store.erase();
               } else {
                 builder.setInsertionPoint(store);
-                builder.create<affine::AffineStoreOp>(
+                auto newStore = builder.create<affine::AffineStoreOp>(
                     store.getLoc(), val, newAlloca.getResult(), zeroMap,
                     ValueRange{});
+                // Annotate port index for the write port (index 1 in reg ports).
+                newStore->setAttr("hir.memref_port",
+                                  builder.getI64IntegerAttr(1));
                 store.erase();
               }
             }
@@ -235,8 +317,9 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
       }
 
       // -----------------------------------------------------------------------
-      // 2d. Annotate affine.load ops with {result_delays=[rd_latency]}
+      // 2e. Annotate affine.load ops with {result_delays=[rd_latency]}
       //     derived from the hir.memref.ports of the accessed memref.
+      //     (Runs after 2c so bind_storage allocas already have the attr.)
       // -----------------------------------------------------------------------
       func.walk([&](affine::AffineLoadOp load) {
         Value memref = load.getMemref();
@@ -266,10 +349,48 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
         load->setAttr(
             "result_delays",
             builder.getArrayAttr({builder.getI64IntegerAttr(rdLatency)}));
+
+        // Annotate which port index is the read port.
+        int64_t rdPortIdx = getPortIndex(ports, "rd_latency");
+        if (rdPortIdx >= 0)
+          load->setAttr("hir.memref_port",
+                        builder.getI64IntegerAttr(rdPortIdx));
       });
 
       // -----------------------------------------------------------------------
-      // 2e. Annotate func.call ops with {result_delays} from the callee's
+      // 2e-store. Annotate affine.store ops with {hir.memref_port=<wr idx>}
+      //           derived from the hir.memref.ports of the written memref.
+      // -----------------------------------------------------------------------
+      func.walk([&](affine::AffineStoreOp store) {
+        Value memref = store.getMemref();
+        ArrayAttr ports = nullptr;
+
+        // Case 1: memref is a function argument.
+        if (auto blockArg = memref.dyn_cast<BlockArgument>()) {
+          unsigned argIdx = blockArg.getArgNumber();
+          if (auto portsAttr = func.getArgAttrOfType<ArrayAttr>(
+                  argIdx, "hir.memref.ports"))
+            ports = portsAttr;
+        }
+        // Case 2: memref is defined by an AllocaOp.
+        else if (auto allocaOp =
+                     dyn_cast_or_null<memref::AllocaOp>(
+                         memref.getDefiningOp())) {
+          if (auto portsAttr =
+                  allocaOp->getAttrOfType<ArrayAttr>("hir.memref.ports"))
+            ports = portsAttr;
+        }
+
+        if (!ports)
+          return;
+        int64_t wrPortIdx = getPortIndex(ports, "wr_latency");
+        if (wrPortIdx >= 0)
+          store->setAttr("hir.memref_port",
+                         builder.getI64IntegerAttr(wrPortIdx));
+      });
+
+      // -----------------------------------------------------------------------
+      // 2f. Annotate func.call ops with {result_delays} from the callee's
       //     hir.delay on its result (item A: use i64).
       // -----------------------------------------------------------------------
       func.walk([&](func::CallOp call) {
@@ -293,7 +414,7 @@ struct AffineToHIRPrepPass : public AffineToHIRPrepBase<AffineToHIRPrepPass> {
       });
 
       // -----------------------------------------------------------------------
-      // 2f. Rename hls.PIPELINE_II -> II on affine.for loops.
+      // 2g. Rename hls.PIPELINE_II -> II on affine.for loops.
       // -----------------------------------------------------------------------
       func.walk([&](affine::AffineForOp loop) {
         if (auto attr =
