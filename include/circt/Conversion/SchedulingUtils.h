@@ -41,7 +41,7 @@ struct OpInfo {
   mlir::Value getParentLoopIV(int i);
   virtual int64_t getDelay() = 0;
   virtual bool isConstant() = 0;
-  virtual ~OpInfo(){};
+  virtual ~OpInfo() {};
 
 private:
   mlir::SmallVector<mlir::affine::AffineForOp> parentLoops;
